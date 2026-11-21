@@ -1,0 +1,10 @@
+Test: production libwasmvm 3.0.8-rc.3 (sha256 0b18713c...), x86_64 .so, ctypes harness
+Steps: init_cache -> store_code(checked=True) -> instantiate -> execute
+Config in module: if (param i64) (result i64) else omitted, 1000 iterations, prefix=32, param=1, condition=0
+
+init_cache OK cache=0x3432ab40 version=b'3.0.8-rc.3'
+WASM len 1371
+store_code checked=True checksum=a15dd177358c557511e9633de962a04fa3faa7a7424a30a6ee29f80ff017d1d9 err=b''
+instantiate res=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' gas_used_internally=1116590
+execute res=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' gas_used_internally=17450730
+

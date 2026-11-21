@@ -1,0 +1,7 @@
+Probe experiments aimed at turning the drift into a controlled native read/write:
+  probe with 0/5/6/10 stack params at 1k..50k iterations -> returns 123, no corruption
+  probe returning its 6th stack param as 8-byte response at 1k/10k iters -> 123
+  two-phase: 10/100/1000/10000 drift iterations then 50-argument probe -> 123
+Interpretation: caller and callee stay RSP-consistent, so the drift alone leaks
+stack (DoS at guard page) without an observed cross-frame read in this harness.
+

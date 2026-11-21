@@ -1,0 +1,6 @@
+Trigger run at 132000 iterations (implicit else, condition=0), production .so 3.0.8-rc.3:
+
+init_cache OK cache=0xa765340 version=b'3.0.8-rc.3'
+store_code checked=True checksum=19fbe8c03409ee8812557033d6b5452aeb3a29bdd663560ef5dca9fb7d1daf7b err=b''
+instantiate res=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' err=b'' gas_used_internally=1116590
+execute res=None err=b'Error calling the VM: Error executing Wasm: Wasmer runtime error: RuntimeError: call stack exhausted' gas_used_internally=2140653050

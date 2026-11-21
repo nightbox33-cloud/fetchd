@@ -1,0 +1,3 @@
+__pycache__/
+libwasmvm.*.so
+cfg.json

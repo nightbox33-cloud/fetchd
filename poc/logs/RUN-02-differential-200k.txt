@@ -1,0 +1,7 @@
+Differential at 200000 iterations (same binary, same validator, same gas limit):
+  implicit else + condition=0  -> TRAP "call stack exhausted"  (gas 2,140,653,050)   <-- vulnerable path
+  explicit else + condition=0  -> OK  (gas 7,177,120,730)
+  implicit else + condition=1  -> OK  (false arm never taken)
+  param_count=0                -> OK
+  prefix_count=0/1/2           -> OK
+

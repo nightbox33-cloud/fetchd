@@ -1,0 +1,11 @@
+300k iterations, all with param=1, prefix=32:
+  body=empty   implicit cond=0 -> STACK_OVERFLOW_TRAP
+  body=replace implicit cond=0 -> STACK_OVERFLOW_TRAP
+  body=branch  implicit cond=0 -> STACK_OVERFLOW_TRAP
+  body=replace implicit cond=1 -> OK
+  body=replace explicit cond=1 -> OK
+  body=branch  explicit cond=0 -> OK
+  body=empty   explicit cond=1 -> OK
+  body=replace implicit cond=0, prefix=0 -> OK  (no register spill -> no leak)
+=> requires the block parameter to be spilled to the native stack
+

@@ -1,0 +1,226 @@
+[
+ {
+  "ghsa_id": "GHSA-8v4w-x73c-qp73",
+  "severity": "medium",
+  "cve": null,
+  "published_at": "2026-11-13T09:54:23Z",
+  "summary": "Singlepass(x86_64): wrong floating-point expansion for SSE path",
+  "vulnerabilities": [
+   {
+    "package": "",
+    "range": "<7.6.0",
+    "patched": ""
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-6936-225w-643x",
+  "severity": "medium",
+  "cve": null,
+  "published_at": "2026-10-27T14:13:29Z",
+  "summary": "WASIX preopen rights bypass: read-only and write-only preopens not enforced on resolved paths",
+  "vulnerabilities": [
+   {
+    "package": "wasmer-wasix",
+    "range": "<= 0.705.0",
+    "patched": null
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-37h3-8wp9-3hfx",
+  "severity": "low",
+  "cve": null,
+  "published_at": "2026-11-02T12:27:56Z",
+  "summary": "VMContext embedded `Table` can be out-of-sync",
+  "vulnerabilities": [
+   {
+    "package": "wasmer",
+    "range": "<= 7.5.0",
+    "patched": ""
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-274f-8cvf-h4p9",
+  "severity": "high",
+  "cve": null,
+  "published_at": "2026-11-02T12:21:38Z",
+  "summary": "LLVM: call_indirect is off with m0 optimization enabled",
+  "vulnerabilities": [
+   {
+    "package": "",
+    "range": "<=7.5.0",
+    "patched": ""
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-xmhf-978x-4pcx",
+  "severity": "high",
+  "cve": null,
+  "published_at": "2026-11-02T12:22:08Z",
+  "summary": "`Table` type mismatch for set/elem/grow/copy/new operations not checked",
+  "vulnerabilities": [
+   {
+    "package": "",
+    "range": "<= 7.5.0",
+    "patched": ""
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-c99m-6ph2-xqm4",
+  "severity": "low",
+  "cve": null,
+  "published_at": "2026-11-02T12:05:00Z",
+  "summary": "API can enable `memory64` feature leading to wrong code",
+  "vulnerabilities": [
+   {
+    "package": "wasmer",
+    "range": "< 8.0",
+    "patched": ""
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-v2h8-j899-r676",
+  "severity": "critical",
+  "cve": null,
+  "published_at": "2026-11-02T12:02:10Z",
+  "summary": "Singlepass implicit-else miscompilation allows native stack corruption and sandbox escape",
+  "vulnerabilities": [
+   {
+    "package": "wasmer-compiler-singlepass",
+    "range": ">= 7.0.0-alpha.1, <= 7.4.2",
+    "patched": ""
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-hqgf-rvm3-gq5h",
+  "severity": "medium",
+  "cve": null,
+  "published_at": "2026-10-08T09:04:05Z",
+  "summary": "Guest-controlled unbounded host allocation in WASIX getcwd",
+  "vulnerabilities": [
+   {
+    "package": "wasmer-wasix",
+    "range": "<7.2.0",
+    "patched": ">=7.2.0"
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-5cmw-jh9h-wm3r",
+  "severity": "medium",
+  "cve": null,
+  "published_at": "2026-10-08T11:20:23Z",
+  "summary": "Guest-controlled unbounded host allocation in WASIX sock_recv_from",
+  "vulnerabilities": [
+   {
+    "package": "wasmer-wasix",
+    "range": "<7.2.0",
+    "patched": ">=7.2.0"
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-xprp-5pr8-379j",
+  "severity": "medium",
+  "cve": null,
+  "published_at": "2026-10-08T11:19:50Z",
+  "summary": "Guest-controlled unbounded host allocation in WASI poll_oneoff",
+  "vulnerabilities": [
+   {
+    "package": "wasmer-wasix",
+    "range": "<7.2.0",
+    "patched": ">=7.2.0"
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-p7h3-r7cm-8wrm",
+  "severity": "medium",
+  "cve": null,
+  "published_at": "2026-10-08T11:19:17Z",
+  "summary": "Guest-controlled unbounded host allocation in WASI random_get",
+  "vulnerabilities": [
+   {
+    "package": "wasmer-wasix",
+    "range": "<7.2.0",
+    "patched": ">=7.2.0"
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-qw47-6x2w-hxh3",
+  "severity": "medium",
+  "cve": null,
+  "published_at": "2026-10-08T08:57:17Z",
+  "summary": "memory.atomic.wait32 uses incomplete bounds check",
+  "vulnerabilities": [
+   {
+    "package": "Wasmer",
+    "range": "<7.4.0",
+    "patched": ">=7.5.0"
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-r6j4-873j-3vf7",
+  "severity": "medium",
+  "cve": null,
+  "published_at": "2026-10-08T08:50:10Z",
+  "summary": "memory.atomic.notify missing bounds check",
+  "vulnerabilities": [
+   {
+    "package": "Wasmer",
+    "range": "<7.3.0",
+    "patched": ">=7.4.0"
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-g99j-4h54-79vp",
+  "severity": "low",
+  "cve": null,
+  "published_at": "2026-10-08T08:53:14Z",
+  "summary": "[wasmer llvm backend] panic in assertion failed: !(self.has_pending_f32_nan() && other.has_pending_f64_nan())",
+  "vulnerabilities": [
+   {
+    "package": "",
+    "range": "<7.5.0",
+    "patched": ">=7.5.0"
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-55f3-3qvg-8pv5",
+  "severity": "low",
+  "cve": "CVE-2024-38358",
+  "published_at": "2024-06-07T17:57:29Z",
+  "summary": "Symlink bypasses filesystem sandbox",
+  "vulnerabilities": [
+   {
+    "package": "wasmer",
+    "range": "<= 4.3.1",
+    "patched": ""
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-4mq4-7rw3-vm5j",
+  "severity": "high",
+  "cve": "CVE-2023-51661",
+  "published_at": "2023-12-12T00:16:22Z",
+  "summary": "Filesystem sandbox not enforced",
+  "vulnerabilities": [
+   {
+    "package": "wasmer-cli",
+    "range": ">= 3.0.0",
+    "patched": "4.2.4"
+   }
+  ]
+ }
+]

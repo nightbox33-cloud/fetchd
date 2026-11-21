@@ -1,0 +1,10 @@
+Binary search of first failing iteration count (implicit else, condition=0, param=1):
+  last OK    = 131017 iterations
+  first TRAP = 131018 iterations
+  131018 * 8 bytes = 1,048,144 bytes  (0.999588 MiB)
+  DEFAULT_STACK_SIZE in wasmer 7.4.2 = 1,048,576 bytes (1 MiB)
+  residual = 432 bytes -> prologue + locals + red zone reserve
+
+Prefix sweep (register pressure): prefix 4/8/16/24/32/48/64 => identical threshold 131018
+=> leak is exactly 8 bytes per execution, independent of spill count
+

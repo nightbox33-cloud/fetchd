@@ -1,0 +1,84 @@
+{
+ "ghsa_id": "GHSA-v2h8-j899-r676",
+ "cve_id": null,
+ "url": "https://api.github.com/repos/wasmerio/wasmer/security-advisories/GHSA-v2h8-j899-r676",
+ "html_url": "https://github.com/wasmerio/wasmer/security/advisories/GHSA-v2h8-j899-r676",
+ "summary": "Singlepass implicit-else miscompilation allows native stack corruption and sandbox escape",
+ "description": "### Impact\r\n\r\nWasmer's Singlepass compiler incorrectly lowers a valid WebAssembly typed `if` with block parameters and an omitted `else`. An attacker who can cause an application to compile and execute an attacker-controlled WebAssembly module with Singlepass and multi-value support enabled can trigger native stack corruption. This can cause denial of service and can be exploited to escape the WebAssembly sandbox and execute native code with the privileges of the embedding process.\r\n\r\nThe reporter demonstrated native code execution in a Linux x86-64 CosmWasm/wasmvm deployment. Applications exposing unpermissioned contract upload and execution can therefore be remotely exploitable. Exploitability depends on the embedding application's access controls and execution environment. The compiler defect has also been reproduced on ARM64; the complete native-code-execution exploit was not independently reproduced during maintainer validation.\r\n\r\nThe affected backend is `wasmer-compiler-singlepass`. Applications using Wasmer through another package are affected when they select this backend. This investigation did not identify the same defect in Cranelift or LLVM.\r\n\r\n### Affected versions\r\n\r\nThe vulnerability was introduced by the Singlepass multi-value implementation in PR #5869 and first shipped in `7.0.0-alpha.1`. The first affected stable release is `7.0.0`. Released versions through `7.4.2` are affected. Version `6.1.0` rejects the required parameterized block signatures and is not affected by this defect.\r\n\r\nThe original report identified affected downstream builds in wasmvm `2.3.5` and `3.0.8`, which use Wasmer `7.4.2`.\r\n\r\n### Root cause\r\n\r\nWebAssembly permits an `if` with matching parameter and result types to omit its `else`; the implicit false arm must preserve the input values. Singlepass reserves result locations separately from the original block-parameter locations. In the vulnerable lowering, the false-arm label is bound after stack cleanup, so a false condition can bypass the cleanup required for spilled block parameters while the compiler's stack model assumes that cleanup occurred.\r\n\r\nRepeated execution can make the native stack pointer drift away from the compiler's tracked stack position. In the reported x86-64 case, each affected execution leaves an additional eight-byte slot on the native stack. Subsequent native stack accesses can corrupt memory outside the intended stack frame. The trigger is valid WebAssembly and does not require a WebAssembly linear-memory out-of-bounds access.\r\n\r\n### Patches\r\n\r\nA fix has been prepared in the private security branch; the patched release version is pending confirmation.\r\n\r\nThe fix handles a parameterized `if` with an omitted `else` through the existing explicit-`else` lowering at `End`. This restores the false arm's original input locations and stack allocation state before normal result placement and cleanup. It also handles cases where the then arm consumes its inputs or becomes unreachable. Simply moving the false-arm label before `End` cleanup is insufficient for all valid then-arm shapes.\r\n\r\nAfter applying the fix, invalidate and recompile cached or serialized native-code artifacts produced by vulnerable Singlepass versions. Updating the compiler does not repair code that has already been compiled.\r\n\r\n### Workarounds\r\n\r\nDisable WebAssembly multi-value support in trusted validation before compiling untrusted modules with Singlepass, so that the required parameterized block signatures are rejected. Apply the restriction to previously stored modules as well as new uploads, and prevent execution of vulnerable precompiled artifacts. This workaround also rejects otherwise valid modules that require multi-value support.\r\n\r\n### Validation\r\n\r\nRegression coverage exercises both branches with zero, one, and two block parameters; register and spilled-stack layouts; empty and value-replacing then arms; branches and unreachable code; and explicit-`else` controls. A nonrecursive loop regression detects cumulative native stack drift. The vulnerable implementation fails this regression, while the fix passes. Relevant control-flow specification tests also pass.\r\n\r\n### References\r\n\r\n- Introducing change: https://github.com/wasmerio/wasmer/pull/5869\r\n",
+ "severity": "critical",
+ "author": null,
+ "publisher": {
+  "login": "marxin",
+  "id": 2658545,
+  "node_id": "MDQ6VXNlcjI2NTg1NDU=",
+  "avatar_url": "https://avatars.githubusercontent.com/u/2658545?v=4",
+  "gravatar_id": "",
+  "url": "https://api.github.com/users/marxin",
+  "html_url": "https://github.com/marxin",
+  "followers_url": "https://api.github.com/users/marxin/followers",
+  "following_url": "https://api.github.com/users/marxin/following{/other_user}",
+  "gists_url": "https://api.github.com/users/marxin/gists{/gist_id}",
+  "starred_url": "https://api.github.com/users/marxin/starred{/owner}{/repo}",
+  "subscriptions_url": "https://api.github.com/users/marxin/subscriptions",
+  "organizations_url": "https://api.github.com/users/marxin/orgs",
+  "repos_url": "https://api.github.com/users/marxin/repos",
+  "events_url": "https://api.github.com/users/marxin/events{/privacy}",
+  "received_events_url": "https://api.github.com/users/marxin/received_events",
+  "type": "User",
+  "user_view_type": "public",
+  "site_admin": false
+ },
+ "identifiers": [
+  {
+   "value": "GHSA-v2h8-j899-r676",
+   "type": "GHSA"
+  }
+ ],
+ "state": "published",
+ "created_at": null,
+ "updated_at": "2026-11-02T12:02:11Z",
+ "published_at": "2026-11-02T12:02:10Z",
+ "closed_at": null,
+ "withdrawn_at": null,
+ "submission": null,
+ "vulnerabilities": [
+  {
+   "package": {
+    "ecosystem": "rust",
+    "name": "wasmer-compiler-singlepass"
+   },
+   "vulnerable_version_range": ">= 7.0.0-alpha.1, <= 7.4.2",
+   "patched_versions": "",
+   "vulnerable_functions": []
+  }
+ ],
+ "cvss_severities": {
+  "cvss_v3": {
+   "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+   "score": 10.0
+  },
+  "cvss_v4": {
+   "vector_string": null,
+   "score": null
+  }
+ },
+ "cwes": [
+  {
+   "cwe_id": "CWE-787",
+   "name": "Out-of-bounds Write"
+  }
+ ],
+ "cwe_ids": [
+  "CWE-787"
+ ],
+ "credits": [],
+ "credits_detailed": [],
+ "collaborating_users": null,
+ "collaborating_teams": null,
+ "private_fork": null,
+ "comments": 0,
+ "cvss": {
+  "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+  "score": 10.0
+ }
+}

@@ -1,0 +1,8 @@
+{'param_count': 1, 'prefix_count': 32, 'iterations': 300000, 'explicit_else': False, 'condition': 1, 'body': 'replace'} -> OK
+{'param_count': 1, 'prefix_count': 32, 'iterations': 300000, 'explicit_else': True, 'condition': 1, 'body': 'replace'} -> OK
+{'param_count': 1, 'prefix_count': 32, 'iterations': 300000, 'explicit_else': False, 'condition': 0, 'body': 'replace'} -> STACK_OVERFLOW_TRAP
+{'param_count': 1, 'prefix_count': 32, 'iterations': 300000, 'explicit_else': False, 'condition': 0, 'body': 'branch'} -> STACK_OVERFLOW_TRAP
+{'param_count': 1, 'prefix_count': 32, 'iterations': 300000, 'explicit_else': True, 'condition': 0, 'body': 'branch'} -> OK
+{'param_count': 1, 'prefix_count': 32, 'iterations': 300000, 'explicit_else': False, 'condition': 0, 'body': 'empty'} -> STACK_OVERFLOW_TRAP
+{'param_count': 1, 'prefix_count': 32, 'iterations': 300000, 'explicit_else': True, 'condition': 1, 'body': 'empty'} -> OK
+{'param_count': 1, 'prefix_count': 0, 'iterations': 300000, 'explicit_else': False, 'condition': 0, 'body': 'replace'} -> OK

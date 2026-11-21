@@ -1,0 +1,9 @@
+init_cache OK cache=0x297999f0 version=b'3.0.8-rc.3'
+store_code checked=True checksum=a765172e5099841096ed74fd339baf3d78fa3e3ccf1f324c7515a6b1ad3b6945 err=b''
+instantiate res=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' err=b'' gas_used_internally=1116590 remaining=499998883410
+execute res=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' err=b'' gas_used_internally=17450730 remaining=499982549270
+implicit=True iters=1000: instantiate=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' gas=1116590 execute=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' err=b'' gas=17450730
+store_code checked=True checksum=217169ac9bf10e9c6b5826267c88f7d45286ed399f18d31e76f4009ef42bc87d err=b''
+instantiate res=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' err=b'' gas_used_internally=1116590 remaining=499998883410
+execute res=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' err=b'' gas_used_internally=19060730 remaining=499980939270
+implicit=False iters=1000: instantiate=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' gas=1116590 execute=b'{"ok":{"messages":[],"attributes":[],"events":[]}}' err=b'' gas=19060730

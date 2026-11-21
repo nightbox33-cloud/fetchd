@@ -1,0 +1,37 @@
+# Actual commands executed (chronological, trimmed to audit-relevant ones)
+
+# --- inventory ---
+curl -s "https://api.github.com/orgs/fetchai/repos?per_page=100&page=1" > poc/audit/repos_page1.json
+python3 (pin each repo default branch HEAD via /repos/fetchai/<name>/commits/<branch>) > poc/audit/repos_pinned.json
+
+# --- clones (source of truth) ---
+git clone --depth 1 https://github.com/fetchai/fetchd.git
+git clone --depth 1 --branch v3.0.8-rc.3 https://github.com/fetchai/priv_wasmvm_sec.git
+git clone --depth 1 https://github.com/fetchai/priv_wasmd_sec.git
+git clone --depth 1 https://github.com/CosmWasm/wasmvm.git
+git clone --depth 1 --branch v3.0.10 https://github.com/CosmWasm/cosmwasm.git
+git clone --depth 1 --branch v7.4.2 https://github.com/wasmerio/wasmer.git
+git clone --depth 1 --branch v7.5.0 https://github.com/wasmerio/wasmer.git
+git clone --depth 1 https://github.com/fetchai/genesis-fetchhub.git
+git clone --depth 1 https://github.com/fetchai/tokenfactory.git
+git clone --filter=blob:none --no-checkout https://github.com/fetchai/{cw-fetch-std,FIPs,fetch-ethereum-bridge-v1,wasmswap-contracts,multisig-forward}.git
+
+# --- production pin verification ---
+grep -n "priv_wasmvm_sec\|priv_wasmd_sec" go.mod go.sum
+sed -n '110,200p' Makefile
+grep -A2 'name = "wasmer-compiler-singlepass"' priv_wasmvm_sec/libwasmvm/Cargo.lock
+sha256sum priv_wasmvm_sec/internal/api/libwasmvm.x86_64.so
+tar -xJf? -> unxz -c priv_wasmvm_sec/internal/api/libwasmvm_muslc.x86_64.a.xz | sha256sum
+
+# --- PoC ---
+python3 -m pip install --break-system-packages wasmtime
+LIBWASMVM_PATH=.../libwasmvm.x86_64.so python3 poc/child_probe.py
+LIBWASMVM_PATH=... python3 poc/sweep_controls.py
+LIBWASMVM_PATH=... python3 poc/sweep_variants.py
+LIBWASMVM_PATH=... python3 poc/bisect_threshold.py
+LIBWASMVM_PATH=... python3 poc/bisect_prefix.py
+
+# --- advisory cross-check ---
+curl -s https://api.github.com/repos/wasmerio/wasmer/security-advisories/GHSA-v2h8-j899-r676
+curl -s https://api.github.com/repos/CosmWasm/advisories/contents/CWAs/CWA-2026-006.md
+curl -s https://api.github.com/repos/wasmerio/wasmer/commits/e5ca9b93809d744af8b33488a748a284d3d41955

@@ -1,0 +1,77 @@
+{
+ "ghsa_id": "GHSA-37h3-8wp9-3hfx",
+ "cve_id": null,
+ "url": "https://api.github.com/repos/wasmerio/wasmer/security-advisories/GHSA-37h3-8wp9-3hfx",
+ "html_url": "https://github.com/wasmerio/wasmer/security/advisories/GHSA-37h3-8wp9-3hfx",
+ "summary": "VMContext embedded `Table` can be out-of-sync",
+ "description": "### Summary\r\n\r\nFor a table with fixed number of elements, we intentionally embed the `Table` as part of the `VMContext`. However, the table elements might end up out-of-sync for some operations like:\r\n - from the host through `Table::set` or `Table::copy`\r\n - by another Wasm instance importing the same table - including its element initialization\r\n\r\n### Details\r\n\r\nDescribed already.\r\n\r\n### Proof of concept\r\n\r\n________________________________________________________________________________________________________________________________________________________________________________\r\n\r\n### Impact\r\n\r\nA low impact.",
+ "severity": "low",
+ "author": null,
+ "publisher": {
+  "login": "marxin",
+  "id": 2658545,
+  "node_id": "MDQ6VXNlcjI2NTg1NDU=",
+  "avatar_url": "https://avatars.githubusercontent.com/u/2658545?v=4",
+  "gravatar_id": "",
+  "url": "https://api.github.com/users/marxin",
+  "html_url": "https://github.com/marxin",
+  "followers_url": "https://api.github.com/users/marxin/followers",
+  "following_url": "https://api.github.com/users/marxin/following{/other_user}",
+  "gists_url": "https://api.github.com/users/marxin/gists{/gist_id}",
+  "starred_url": "https://api.github.com/users/marxin/starred{/owner}{/repo}",
+  "subscriptions_url": "https://api.github.com/users/marxin/subscriptions",
+  "organizations_url": "https://api.github.com/users/marxin/orgs",
+  "repos_url": "https://api.github.com/users/marxin/repos",
+  "events_url": "https://api.github.com/users/marxin/events{/privacy}",
+  "received_events_url": "https://api.github.com/users/marxin/received_events",
+  "type": "User",
+  "user_view_type": "public",
+  "site_admin": false
+ },
+ "identifiers": [
+  {
+   "value": "GHSA-37h3-8wp9-3hfx",
+   "type": "GHSA"
+  }
+ ],
+ "state": "published",
+ "created_at": null,
+ "updated_at": "2026-11-02T12:27:56Z",
+ "published_at": "2026-11-02T12:27:56Z",
+ "closed_at": null,
+ "withdrawn_at": null,
+ "submission": null,
+ "vulnerabilities": [
+  {
+   "package": {
+    "ecosystem": "rust",
+    "name": "wasmer"
+   },
+   "vulnerable_version_range": "<= 7.5.0",
+   "patched_versions": "",
+   "vulnerable_functions": []
+  }
+ ],
+ "cvss_severities": {
+  "cvss_v3": {
+   "vector_string": null,
+   "score": null
+  },
+  "cvss_v4": {
+   "vector_string": null,
+   "score": null
+  }
+ },
+ "cwes": [],
+ "cwe_ids": [],
+ "credits": [],
+ "credits_detailed": [],
+ "collaborating_users": null,
+ "collaborating_teams": null,
+ "private_fork": null,
+ "comments": 0,
+ "cvss": {
+  "vector_string": null,
+  "score": null
+ }
+}

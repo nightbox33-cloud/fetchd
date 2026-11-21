@@ -1,0 +1,25 @@
+=== Threshold ===
+iters=130000 param=1 prefix=32 explicit=False cond=0 body=empty -> OK
+iters=132000 param=1 prefix=32 explicit=False cond=0 body=empty -> TRAP
+iters=134000 param=1 prefix=32 explicit=False cond=0 body=empty -> TRAP
+iters=135000 param=1 prefix=32 explicit=False cond=0 body=empty -> TRAP
+
+=== Prefix sweep (200k iters, implicit, false) ===
+iters=200000 param=1 prefix=0 explicit=False cond=0 body=empty -> OK
+iters=200000 param=1 prefix=1 explicit=False cond=0 body=empty -> OK
+iters=200000 param=1 prefix=2 explicit=False cond=0 body=empty -> OK
+iters=200000 param=1 prefix=4 explicit=False cond=0 body=empty -> TRAP
+iters=200000 param=1 prefix=8 explicit=False cond=0 body=empty -> TRAP
+iters=200000 param=1 prefix=16 explicit=False cond=0 body=empty -> TRAP
+iters=200000 param=1 prefix=31 explicit=False cond=0 body=empty -> TRAP
+iters=200000 param=1 prefix=32 explicit=False cond=0 body=empty -> TRAP
+
+=== Param sweep (200k, prefix=32) ===
+iters=200000 param=0 prefix=32 explicit=False cond=0 body=empty -> OK
+iters=200000 param=1 prefix=32 explicit=False cond=0 body=empty -> TRAP
+
+=== Condition sweep ===
+iters=200000 param=1 prefix=32 explicit=False cond=0 body=empty -> TRAP
+iters=200000 param=1 prefix=32 explicit=False cond=1 body=empty -> OK
+iters=200000 param=1 prefix=32 explicit=True cond=0 body=empty -> OK
+iters=200000 param=1 prefix=32 explicit=True cond=1 body=empty -> OK
