@@ -199,6 +199,11 @@ def op_i32_reinterpret_f32():
     return b"\xbc"
 
 
+def op_select():
+    """select (0x1B): pops c, val2, val1 -> val1 if c != 0 else val2."""
+    return b"\x1b"
+
+
 def op_i32_eqz():
     return b"\x45"
 

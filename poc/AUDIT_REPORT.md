@@ -12,7 +12,7 @@
 |---|----------|--------|----------------------|
 | 1a | Miscompilación de Singlepass (`if` con parámetro de bloque y `else` implícito) presente en producción | **Confirmado, sin parchear** | **Media** — disparador permissionless y barato (**7 754 gas de SDK**); rompe contratos legítimos |
 | 1b | **Escalada de la misma fuga a muerte del proceso** (`SIGSEGV` irrecuperable), que ocurre en `FinalizeBlock` | **Confirmado, sin parchear** | **Crítica** — disparador permissionless de **4 652 gas de SDK** (430× de holgura) que **detiene la cadena completa**: todos los nodos ejecutan el bloque y mueren (§2.8.6) |
-| 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU y **ramificación divergente** | **Confirmado, sin parchear** | **Media/Alta** — riesgo de **divergencia de app hash** entre arquitecturas y al aplicar el parche |
+| 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU, **ramificación divergente** y **precio cobrado ≠ precio cotizado** (§2.9.6) | **Confirmado, sin parchear** | **Media/Alta** — divergencia de app hash entre arquitecturas, riesgo financiero en contratos de terceros con `f64` y riesgo al aplicar el parche |
 | 2 | Respuesta vacía del VM (`res.Ok == nil`) en wasmd | **Resuelto** — ya está en upstream v0.61.15 | Ninguna (guardas presentes) |
 | 3 | Clasificación errónea de fallos por el harness C ABI | **Corregido** en el PoC | Afectaba a reproducciones previas |
 | 4 | Confusión de unidades de gas (puntos de CosmWasm ≠ gas del SDK) en un análisis previo | **Corregido** — ver §2.5 | Invertía la conclusión de alcance |
@@ -47,13 +47,20 @@ acota la superficie a `if (param T)(result T)`, y `CodeUploadAccess = AllowEvery
   puede instanciar el contrato y después bombardear las consultas contra los nodos RPC
   publicos: cada nodo que responde, muere. El limite de gas de la query (3 000 000) no protege,
   porque el crash cuesta 4 652.
-- **Como no determinismo de coma flotante** (ver **§2.9.2**): la rama falsa del `else` implícito
-  **se salta la canonicalización de NaN**, de modo que un `f64` NaN conserva el *payload del
-  hardware* (0xFFF8… en x86-64, 0x7FF8… en AArch64) en lugar del patrón canónico. Consecuencia
-  práctica: **el mismo programa da distinto resultado según cómo el compilador emitiera el
-  `if`**, y una red con validadores de arquitecturas distintas puede obtener **app hashes
-  distintos**. Además, **aplicar el fix upstream cambia el resultado** de esos contratos, así que
-  el backport no es semánticamente neutro.
+- **Como no determinismo de coma flotante** (ver **§2.9.2**, **§2.9.5**, **§2.9.6**): la rama
+  falsa del `else` implícito **se salta la canonicalización de NaN**, de modo que un `f64` NaN
+  conserva el *payload del hardware* (0xFFF8… en x86-64, 0x7FF8… en AArch64) en lugar del patrón
+  canónico. Consecuencia práctica: **el mismo programa da distinto resultado según cómo el
+  compilador emitiera el `if`**, y una red con validadores de arquitecturas distintas puede
+  obtener **app hashes distintos**. Además, **aplicar el fix upstream cambia el resultado** de
+  esos contratos, así que el backport no es semánticamente neutro.
+- **Como desacuerdo entre el precio cotizado y el cobrado** (ver **§2.9.6**): medido sobre el
+  `.so` de producción — un contrato cuyo `query` (cotización) usa el `if` implícito y cuyo
+  `execute` (cobro) usa el `else` explícito hace que **el usuario vea 900 y pague 1000**, en el
+  mismo nodo y en la misma cadena. Es un vector financiero **de contratos de terceros**: el
+  atacante no necesita el bug para escribir un AMM tramposo, pero sí lo necesita para que la
+  asimetría aparezca **sin que nadie la buscara**. El defecto, por sí solo, **no** es un robo
+  permissionless: lo grave sigue siendo el halt de cadena de §2.8.
 
 > **Corrección de una versión anterior de este informe.** Una iteración previa de esta auditoría
 > concluyó que el disparador era inalcanzable ("brecha de 543×"). **Era un error de unidades:**
@@ -789,10 +796,13 @@ sqrt       0     1          2          *** RAMIFICACION DIVERGENTE ***
    cambia al actualizar Wasmer. **El backport del fix no es semanticamente neutro** y hay que
    auditar los contratos de coma flotante antes de aplicarlo.
 
-**Lo que NO es:** no hay robo de fondos ni corrupcion de la cadena por esta via. Un NaN no se
-puede serializar en JSON (serde_json lo rechaza), asi que el valor no puede almacenarse en el
-estado; lo observable es la *ramificacion* y, con ella, el estado que el contrato decide
-escribir. El vector es de **divergencia de estado/app hash**, no de robo.
+**Lo que NO es (matizado en §2.9.5 y §2.9.6):** un NaN no se puede serializar en JSON
+(serde_json lo rechaza), asi que **el float en si** no puede almacenarse en el estado; lo
+observable es la *ramificacion* sobre sus bits y, con ella, el estado que el contrato decide
+escribir. **La version anterior de este parrafo afirmaba que "no hay robo por esta via": es
+correcto para el patron medido entonces (el NaN como valor de retorno), pero no en general** —
+con `select` la divergencia es observable *dentro* del contrato, y un par cotizacion/ejecucion
+puede cobrar un precio distinto del cotizado. §2.9.6 lo mide y lo acota.
 
 **Estado de la evidencia:** *directa* para el comportamiento medido (bits y ramificacion) y
 *directa* para la diferencia de JIT. Que el **fix upstream lo corrija** se deduce del diff
@@ -874,6 +884,115 @@ la seccion Type, y la seccion Type es exactamente lo que el limite cuenta.
 **Lo que queda abierto:** `i32` con `enable_nan_canonicalization` no aplica (solo afecta a
 floats); los bloques `(param i32)(result i32)` se comportan como los de `i64` (mismo tipo de
 slot de 8 bytes). No se ha encontrado ninguna desviacion de valor en la superficie alcanzable.
+
+#### 2.9.5 La regla exacta: cuando se pierde la canonicalizacion
+
+Una version anterior de este informe afirmaba que la divergencia solo era observable
+"cuando el NaN es el valor de retorno de la funcion". **Es mas amplio de lo que se afirmaba.**
+`nan_rule_probe.py` mide las cuatro formas en que el NaN puede cruzar el `if`:
+
+| forma | `else` implicito | `else` explicito | que se observa |
+|---|---|---|---|
+| `ret_f64` — el NaN **es** el retorno de la funcion | `0xfff8000000000000` | `0x7ff8000000000000` | el valor devuelto |
+| `ret_i64` — los bits se calculan **dentro** de la funcion | `0xfff8000000000000` | `0x7ff8000000000000` | los bits |
+| **`sel_i64`** — `i64.eq` + **`select`** | la condicion es **1** | **0** | **la divergencia es observable DENTRO del contrato** |
+| `if_i64` — `i64.eq` + un segundo `if` | 900 | 1000 | idem, via un segundo frame |
+
+La regla es:
+
+> El NaN **crudo** sobrevive mientras no vuelva a pasar por un `if`. Cualquier `if` posterior
+> —incluso uno sin resultados— abre un frame cuyo `emit_if_block_end()` → `emit_return_values()`
+> canonicaliza los valores vivos, y a partir de ahi el NaN vuelve a ser canonico.
+> **`select` (0x1B) no abre frame**, no pasa por `emit_return_values()` y por tanto **no
+> canonicaliza**.
+
+Consecuencia: el defecto **no** se limita al valor de retorno de la funcion. Basta con que el
+contrato haga una **decision sobre los bits del NaN mediante `select`**, y la decision sale
+distinta segun la forma del `if`:
+
+```wat
+;; nan = sqrt(-1.0)
+;; if (param f64)(result f64) nan { }          ;; implicito -> nan crudo
+;; bits = i64.reinterpret_f64(nan)
+;; precio = select(bits == 0xFFF8000000000000, 900, 1000)
+```
+
+> **Correccion.** La version anterior de §2.9.2 decia que "no hay robo de fondos ni corrupcion
+> del estado por esta via" y que "un NaN no se puede serializar en JSON, asi que el valor no
+> puede almacenarse en el estado". La primera parte es correcta **para el patron medido
+> entonces** (el NaN como valor de retorno); la segunda es **incorrecta en general**: un
+> contrato puede guardar `nan.to_bits()` (un `u64`, perfectly serializable) o **ramificar** sobre
+> los bits con `select`. §2.9.6 mide el alcance real.
+
+#### 2.9.6 ¿Es posible el robo? — medido, con sus limites
+
+La pregunta es si el defecto permite robar fondos, no solo romper el determinismo. La respuesta
+**medida** es que la divergencia **se traduce en dinero** cuando un contrato tiene dos *entry
+points* que calculan lo mismo con **formas distintas** del `if` — y el caso natural de eso es el
+par **cotizacion / ejecucion** de un AMM.
+
+`nan_money_probe.py` construye un contrato con dos *entry points* que computan el mismo precio:
+
+* `query` — el precio que el usuario **ve** (la cotizacion que devuelve la consulta gRPC
+  `SmartContractState`);
+* `execute` — el importe que la cadena **cobra**.
+
+El precio se decide con `select` sobre los bits del NaN (§2.9.5), de modo que la forma del `if`
+de cada *entry point* decide el resultado. Medido sobre el `.so` de produccion:
+
+| variante | cotizado (`query`) | cobrado (`execute`) | diferencia |
+|---|---|---|---|
+| **`query` implicito / `execute` explicito** | **900** | **1000** | **+100 — la victima PAGA de mas** |
+| `query` implicito / `execute` implicito | 900 | 900 | 0 |
+| `query` explicito / `execute` explicito | 1000 | 1000 | 0 |
+| `query` explicito / `execute` implicito | 1000 | 900 | −100 — la victima PAGA de menos |
+
+Los cuatro casos se comportan exactamente como predice la regla, y son estables entre
+repeticiones (no hay aleatoriedad ni dependence del layout: se midio con 0..5 funciones de
+relleno delante y con dos copias identicas del mismo cuerpo).
+
+**Lo que esto demuestra:** el usuario puede **ver un precio y pagar otro** en el mismo nodo, en la
+misma cadena, sin particion, sin fork y sin stake. La diferencia es exactamente la que el
+atacante se lleva.
+
+**Lo que esto NO demuestra, y hay que decirlo con precision:**
+
+1. **El atacante no necesita este bug para montar un AMM tramposo.** Puede escribir dos funciones
+   que devuelvan precios distintos a proposito. El defecto **no habilita un robo nuevo por si
+   mismo** en ese escenario.
+2. **Lo que el bug si aporta es que la asimetria puede existir sin que nadie la haya buscado.**
+   Basta con que el autor de un contrato escribiera el `query` con un `if` a secas y el
+   `execute` con un `if`/`else` (o al reves) — una decision editorial que en un lenguaje sin
+   coma flotante seria inocua. El defecto convierte esa asimetria *editorial* en una asimetria
+   *de bits*, y por tanto en dinero. **Ese es el vector real: contratos de terceros, no
+   contratos del atacante.**
+3. **La condicion sigue siendo estrecha:** el contrato tiene que usar `f64`/`f32`, ejecutar una
+   operacion que produzca un NaN (`sqrt` de un negativo, `0/0`, `inf-inf`, `floor`/`ceil` de un
+   NaN), Comparar **los bits**, y tener el par cotizacion/ejecucion. Los precios en DeFi se
+   calculan normalmente con enteros o `Decimal` de `cosmwasm-std`, no con `f64` crudo: un AMM
+   real es **poco probable** queaffeine de este patron. Es *posible*, no *probable*.
+4. **La via que el bug si crea y el atacante no puede evitar es la heterogeneidad de
+   arquitectura** (§2.9.2, consecuencia 1): un contrato que ramifique sobre los bits del NaN
+   produce **un estado en x86-64 y otro en AArch64**. Ahi la consecuencia primaria es un **split de
+   consensus**, no un robo: los dos grupos de validadores votan estados distintos y la cadena se
+   detiene. Convertir un split en un robo exigiria ademas ganar el fork choice, lo que exige
+   una fraccion del stake que este defecto **no** proporciona.
+
+**Veredicto.** El defecto **no es un robo permissionless por si mismo**, y presentarlo como tal
+seria exagerar. Lo que es:
+
+* un **ataque de disponibilidad** permissionless y muy barato (el de §2.8), que es lo grave;
+* un **ruptor de equivalencia semantica** con consecuencias financieras posibles en contratos de
+  terceros con coma flotante (esto es lo que se ha medido aqui);
+* un **generador de split de consensus** en redes con validadores de arquitecturas distintas;
+* y una **trampa para el propio backport**: §2.9.2, consecuencia 3 — al aplicar el fix, los
+  contratos afectados cambian de comportamiento, y para un AMM eso puede significar que la
+  cotizacion y la ejecucion se alineen (o se desalineen) **en el momento del upgrade**.
+
+La recomendacion de §2.12 no cambia: **backport del fix upstream**, y **auditoria de los
+contratos con coma flotante antes de aplicarlo** — esa auditoria es ahora mas urgente, porque
+el patron vulnerable no es solo "el NaN como valor de retorno", sino "cualquier decision sobre
+los bits de un NaN, hecha con `select`".
 
 ### 2.10 La configuracion efectiva en fetchd, verificada extremo a extremo
 
@@ -1140,6 +1259,12 @@ python3 escalation_matrix.py --prefix 4 --stacks 512K,1M,2M
 # bits del f64 y RAMIFICACION divergente entre `else` implicito y explicito
 python3 nan_canon_probe.py
 
+# --- regla exacta de la perdida de canonicalizacion (§2.9.5) ---
+python3 nan_rule_probe.py
+
+# --- ¿es posible el robo? par cotizacion/cobro (§2.9.6) ---
+python3 nan_money_probe.py
+
 # --- matriz de formas: semantica de valores (§2.9.3) ---
 python3 shape_matrix.py
 
@@ -1195,10 +1320,14 @@ Fuentes de referencia obtenidas para esta auditoría:
   de `priv_wasmvm_sec` configurase `VMConfig::wasm_stack_size`, el umbral cambiaría
   proporcionalmente; el `.so` de producción **no exporta** ningun setter de ese tamaño, asi que
   se usa el valor por defecto.
-* La busqueda de una via de *manipulacion del flujo de control* o *exfiltracion* (distinta de la
-  escalada a muerte de proceso) **sigue abierta**: §2.9.2 demuestra una **ramificacion divergente**
-  por la perdida de la canonicalizacion de NaN, pero **no** una exfiltracion de datos ni una
-  corrupcion del estado de la cadena; el vector medido es de divergencia de app hash.
+* La busqueda de una via de *exfiltracion* de datos (distinta de la escalada a muerte de proceso
+  y del vector financiero de §2.9.6) **sigue abierta**: §2.9.2 demuestra una **ramificacion
+  divergente** por la perdida de la canonicalizacion de NaN y §2.9.6 un **precio cobrado
+  distinto del cotizado**, pero **no** una exfiltracion de datos ni una corrupcion del estado de
+  la cadena. El vector de consenso medido es la **divergencia de app hash**; el vector financiero
+  medido exige un contrato de terceros con `f64` y una comparacion **a nivel de bits**, que es
+  un patron **posible pero poco probable** en DeFi real (los precios se calculan con enteros o
+  `Decimal`).
 * ~~La cobertura de la sonda de integridad sigue limitada a la forma `(param i64) (result i64)`~~
   — **parcialmente resuelto**: `shape_matrix.py` (§2.9.3) cubre ahora `passthrough`, `replace`,
   `branch` (con un valor **distinto**, el caso que el test upstream no puede distinguir),
