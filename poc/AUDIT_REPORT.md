@@ -1092,9 +1092,12 @@ La secuencia, paso a paso:
    todos los bloques canonicos y no puede resincronizar nunca. Su stake queda inoperante y el
    grupo mayoritario no puede recuperarlo.
 2. **Halt si el stake atascado supera 1/3.** Los nodos atascados no votan, de modo que la rama
-   mayoritaria deja de alcanzar 2/3 del stake *total* y la cadena se detiene en esa altura. Y el
-   atacante puede **repetir** el ataque — desplegar otro contrato divergente — para **mantener**
-   el halt de forma permissionless.
+   mayoritaria deja de alcanzar el quorum y la cadena se detiene en esa altura. Con la formula
+   exacta de CometBFT (`abci_utils.go:143`: `requiredVP := ((totalVP * 2) / 3) + 1`), si el
+   stake total es 100 el quorum son 67: con un 33 % atascado la rama mayoritaria (67) **aun
+   commitea**, y con un 34 % (66 < 67) la cadena **se detiene**. El umbral es por tanto
+   `stake atascado > 1/3 del total`. Y el atacante puede **repetir** el ataque — desplegar otro
+   contrato divergente — para **mantener** el halt de forma permissionless.
 3. **Ventana de robo por congelamiento.** Durante el halt hay dos historiales candidatos, los
    precios *off-chain* siguen moviendose y las operaciones de los usuarios (liquidaciones, swaps
    abiertos, prestamos) quedan congeladas. Ese es el hueco donde un atacante puede operar con
