@@ -16,6 +16,11 @@ El `.so` de producción se espera en
 `.audit/priv_wasmvm_sec/internal/api/libwasmvm.x86_64.so`
 (ruta configurable en `run_poc.py`, constante `LIB`).
 
+`nan_isa_probe.py` necesita además un emulador ARM64 para medir el lado
+AArch64: `pip install unicorn` (probado con 2.1.4). El resto de los scripts
+no tienen dependencias externas más allá de `gcc` para el lado x86-64 de esa
+misma sonda.
+
 ## Scripts principales
 
 | Script | Qué hace |
@@ -46,6 +51,9 @@ El `.so` de producción se espera en
 | **`query_vector.py`** | **Segundo vector (§2.8.7)**: el entry point `query` (el de la consulta gRPC `SmartContractState`) tambien mata el proceso — `query-implicit` → **SIGSEGV**, `query-explicit` → ok, `execute-implicit` → SIGSEGV. Umbral: ≤131 540 → trampa, **≥131 541 → SIGSEGV** |
 | **`nan_rule_probe.py`** | **La regla exacta de la pérdida de canonicalización** (§2.9.5): 4 formas de cruzar el NaN por el `if`. Clave: **`select` (0x1B) no abre frame y no canonicaliza**, así que la divergencia es observable *dentro* del contrato |
 | **`nan_money_probe.py`** | **¿Es posible el robo? (§2.9.6)**: el par cotización (`query`) / cobro (`execute`) de un AMM. Con `if` implícito en uno y explícito en el otro, el usuario **ve 900 y paga 1000** — 4/4 casos medidos y estables |
+| **`nan_operator_matrix.py`** | **Matriz de 30 constructos (§2.9.8)**: qué operadores dejan escapar el NaN crudo. Dos sondas: **A** (los 64 bits que ve un atacante tras `i64.reinterpret_f64`) y **B** (los 64 bits que quedan en el estado tras `f64.store`). Resultado: **`br_if`, `br_table`, `return`, `call` y `call_indirect` canonicalizan** y **no** añaden canales; escapan el `else` implícito, `f64.load`, `f64.load`+`f64.store` (persiste en el estado), `f64.load`+`f64.copysign(-1.0)`, `f64.load`+`select` y `f64.reinterpret_i64` |
+| **`nan_isa_probe.py`** | **¿Cada ISA produce los mismos bits? (§2.9.9)**: mide `SQRTSD(-1.0)` en x86-64 nativo (→ `0xfff8000000000000`) y `FSQRT(-1.0)` en emulación ARM64 real (→ `0x7ff8000000000000`). **La misma operación inválida produce bits distintos en cada ISA** — el origen medido de la divergencia cross-arquitectura. Necesita `pip install unicorn` |
+| **`nan_oracle_probe.py`** | **Manipulación de oráculo cross-arquitectura (§2.9.9)**: el mismo contrato de terceros devuelve un precio distinto en un nodo x86-64 y en uno AArch64. Magnitudes medidas: 900/1000 → 10 %, 1/2 → 50 %, **0/1 000 000 → 100 %**. Sin halt, sin fork, sin stake: es divergencia *off-chain* entre dos nodos honestos |
 | **`blocktype_probe.py`** | **¿Hay escapatoria del límite `max_function_results`?** Un `if` multi-resultado por type index → `REJECTED`; por tipo func *inline* → `REJECTED` (el parser no lo admite); control `(param i32)(result i32)` → `OK`. La superficie alcanzable es exactamente `if (param T)(result T)` |
 | **`shape_matrix.py`** | Matriz de **formas** de bloque (`passthrough`, `replace`, `branch` con valor distinto, `unreachable`, `nested`, `f32`): el `else` implícito coincide con el explícito y con la spec en **0 desviaciones** |
 | `drift_fault.py` | Diagnóstico del aterrizaje del SP desviado y mapa de memoria completo |
@@ -137,6 +145,22 @@ real de fetchd sea heterogéneo (un grupo AArch64 con voting power). ARM es plat
 de arquitecturas del set de validadores **no es pública ni verificable**, y el hardware
 recomendado en `docs/docs/validators/overview.md` es exclusivamente x86-64. El informe no
 afirma que la red fetchd sea vulnerable a esto.
+
+**La matriz de operadores (§2.9.8) cierra el hueco que §2.9.5 dejaba abierto.** Los operadores
+que faltaban —`br_if`, `br_table`, `return`, `call_indirect`— **canonicalizan** y no añaden
+canales. Los que sí dejan escapar el patrón crudo son el `else` implícito (el bug),
+`f64.load` (y `f64.load`+`f64.store`, que lo hace **persistente en el estado**), `select` y
+`f64.copysign` **cuando la marca ya se perdió antes**, y `f64.reinterpret_i64`. La regla real
+no es "sobrevive mientras no vuelva a pasar por un `if`" sino la de la *marca pendiente*
+(`CanonicalizeType`): se canonicaliza si y solo si la marca sigue pendiente.
+
+**La divergencia de oráculo entre arquitecturas (§2.9.9) es real y es un vector financiero.**
+No hace falta halt, fork ni stake: la **misma operación inválida produce bits distintos en cada
+ISA** (medido: `SQRTSD(-1.0)` → `0xfff8…` en x86-64, `FSQRT(-1.0)` → `0x7ff8…` en ARM64), de
+modo que el mismo contrato de terceros devuelve un **precio distinto** según el nodo que
+sirve la consulta. La magnitud la elige el contrato: **hasta el 100 %**. Las condiciones son un
+contrato de terceros con el patrón, un consumidor que no media y dos arquitecturas al alcance.
+No es un split de consensus (una `query` no cambia el estado) y no es robo del protocolo.
 
 **La canonicalización de NaN también se pierde (§2.9.2).** Singlepass la activa por defecto
 (`enable_nan_canonicalization: true`), pero la difiere: `f64.sqrt/floor/ceil/trunc/nearest` y las

@@ -12,7 +12,7 @@
 |---|----------|--------|----------------------|
 | 1a | Miscompilación de Singlepass (`if` con parámetro de bloque y `else` implícito) presente en producción | **Confirmado, sin parchear** | **Media** — disparador permissionless y barato (**7 754 gas de SDK**); rompe contratos legítimos |
 | 1b | **Escalada de la misma fuga a muerte del proceso** (`SIGSEGV` irrecuperable), que ocurre en `FinalizeBlock` | **Confirmado, sin parchear** | **Crítica** — disparador permissionless de **4 652 gas de SDK** (430× de holgura) que **detiene la cadena completa**: todos los nodos ejecutan el bloque y mueren (§2.8.6) |
-| 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU, **ramificación divergente**, **precio cobrado ≠ precio cotizado** (§2.9.6) y **split de consensus** (§2.9.7) | **Confirmado, sin parchear** | **Media/Alta** — divergencia de app hash entre arquitecturas, **generador permissionless de splits/halt**, riesgo financiero en contratos de terceros con `f64` y riesgo al aplicar el parche |
+| 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU, **ramificación divergente**, **precio cobrado ≠ precio cotizado** (§2.9.6), **split de consensus** (§2.9.7), **6 canales de escape medidos** (§2.9.8) y **divergencia de precio entre arquitecturas** (§2.9.9) | **Confirmado, sin parchear** | **Media/Alta** — divergencia de app hash entre arquitecturas, **generador permissionless de splits/halt**, **manipulación de oráculo cross-arch** (hasta 100 % de divergencia de precio) y riesgo al aplicar el parche |
 | 2 | Respuesta vacía del VM (`res.Ok == nil`) en wasmd | **Resuelto** — ya está en upstream v0.61.15 | Ninguna (guardas presentes) |
 | 3 | Clasificación errónea de fallos por el harness C ABI | **Corregido** en el PoC | Afectaba a reproducciones previas |
 | 4 | Confusión de unidades de gas (puntos de CosmWasm ≠ gas del SDK) en un análisis previo | **Corregido** — ver §2.5 | Invertía la conclusión de alcance |
@@ -898,13 +898,24 @@ Una version anterior de este informe afirmaba que la divergencia solo era observ
 | **`sel_i64`** — `i64.eq` + **`select`** | la condicion es **1** | **0** | **la divergencia es observable DENTRO del contrato** |
 | `if_i64` — `i64.eq` + un segundo `if` | 900 | 1000 | idem, via un segundo frame |
 
-La regla es:
+La regla (formulacion de esta version, **superada en detalle por §2.9.8**):
 
 > El NaN **crudo** sobrevive mientras no vuelva a pasar por un `if`. Cualquier `if` posterior
 > —incluso uno sin resultados— abre un frame cuyo `emit_if_block_end()` → `emit_return_values()`
 > canonicaliza los valores vivos, y a partir de ahi el NaN vuelve a ser canonico.
 > **`select` (0x1B) no abre frame**, no pasa por `emit_return_values()` y por tanto **no
 > canonicaliza**.
+
+> **Precision (medida en §2.9.8).** Esa formulacion es **imprecisa** en dos puntos, y §2.9.8 la
+> sustituye por la regla exacta, que es la de la *marca pendiente* (`CanonicalizeType`):
+>
+> * `select` **si** canonicaliza el operando elegido **si su marca sigue pendiente**
+>   (`codegen.rs:2694-2706`). Lo que §2.9.5 llama "no canonicaliza" es el caso en que la marca
+>   ya se perdio antes — y entonces si filtra.
+> * `f64.copysign` **no** canonicaliza nunca: es una operacion de bits. El patron resultante
+>   coincide con el canonico solo por casualidad (borra el bit de signo).
+>
+> La matriz de 30 constructos de §2.9.8 es la referencia.
 
 Consecuencia: el defecto **no** se limita al valor de retorno de la funcion. Basta con que el
 contrato haga una **decision sobre los bits del NaN mediante `select`**, y la decision sale
@@ -1134,6 +1145,187 @@ halt con dos historiales validos. Y la accion operativa inmediata sigue siendo l
 los contratos nuevos por gobernanza** (`CodeUploadAccess`), que corta la cadena en su primer
 eslabon — y que ademas es la unica mitigacion que funciona **con independencia de cual sea la
 arquitectura del set de validadores**.
+
+#### 2.9.8 La matriz completa de operadores: que constructos dejan escapar el NaN crudo
+
+§2.9.5 caracteriza la regla con dos ejemplos (`if` con `else` implicito y `select`) y
+deja abierta en §6 la lista de operadores no cubiertos. **Esa lista ya no esta abierta:**
+`nan_operator_matrix.py` mide, sobre el `.so` de produccion, **30 constructos** de Wasm
+que pueden transportar un `f64` a traves del codigo.
+
+**El mecanismo, con nombre y sitio.** En el backend Singlepass cada valor `f64` de la pila
+lleva una marca (`CanonicalizeType`, `codegen.rs:173`). La canonicalizacion —bit a bit, al
+canonico `0x7FF8000000000000`— se aplica **unicamente** en los puntos que leen esa marca:
+
+| punto de canonicalizacion | sitio | condicion |
+|---|---|---|
+| salida de la funcion | `codegen.rs:1116` (`emit_return_values`) | marca pendiente |
+| `local.set` / `local.tee` | `codegen.rs:1295` / `1317` | local de tipo float y marca pendiente |
+| `global.set` | `codegen.rs:1269` | marca pendiente |
+| `f64.store` | `codegen.rs:3495` → `machine_x64.rs:6727` | marca pendiente |
+| `i64.reinterpret_f64` | `codegen.rs:2091` | marca pendiente |
+| `select` | `codegen.rs:2697` / `2706` | la marca del operando **elegido** |
+| antes de `call` / `call_indirect` | `codegen.rs:2314` / `2377` | argumentos float |
+
+La marca la **ponen** los operadores que *producen* un valor flotante
+(`f64.add/sub/mul/div`, `f64.ceil/floor/nearest/sqrt/trunc`) y la **borran** los que solo lo
+*mueven* (`f64.load`, `f64.reinterpret_i64`, `f64.copysign`, `f64.max`, `f64.min`,
+`local.get`, `global.get`, `select`, `i64.reinterpret_f64`). El bug del `else` implicito es
+precisamente un caso mas de "marca borrada": `Operator::If` copia la entrada al slot de
+retorno con un `emit_relaxed_mov` **sin canonicalizar** (`codegen.rs:2594-2599`), y el slot
+nace con marca `None` (`codegen.rs:477`).
+
+**La matriz medida.** Dos sondas: **A** (observable) volca los 64 bits que veria un atacante
+tras `i64.reinterpret_f64`; **B** (estado) volca los 64 bits que quedan en la memoria del
+contrato tras `f64.store`. Se miden los bits exactos, no un booleano, para no confundir
+"canonicalizado" con "cambiado de signo".
+
+| constructo | A observable | B estado | veredicto |
+|---|---|---|---|
+| `baseline` (control, sin constructo) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| **`if` con `else` implicito** | **`0xfff8…`** | **`0xfff8…`** | **ESCAPA** |
+| `if` con `else` explicito | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `if` con `else` explicito, rama activa | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `select` (operando con marca pendiente) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `br_if` (tomado) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `br_if` (no tomado) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `br` | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `br_table` | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `return` temprano | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `block` (resultado f64) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `loop` (resultado f64) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `local.set` + `local.get` | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `local.tee` | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `global.set` + `global.get` | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| **`f64.load` (memoria)** | **`0xfff8…`** | **`0xfff8…`** | **ESCAPA** |
+| **`f64.load` + `f64.store`** | **`0xfff8…`** | **`0xfff8…`** | **ESCAPA (persiste en el estado)** |
+| `f64.load` + `f64.copysign(+1.0)` | `0x7ff8…` | `0x7ff8…` | canonicaliza (por el signo, no por canonicalizar) |
+| **`f64.load` + `f64.copysign(-1.0)`** | **`0xfff8…`** | **`0xfff8…`** | **ESCAPA** |
+| `f64.load` + `f64.max` | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| **`f64.load` + `select`** | **`0xfff8…`** | **`0xfff8…`** | **ESCAPA** |
+| `f64.copysign` (directo) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `f64.copysign` (via `local.get`) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `f64.max` | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `f64.min` | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| **`f64.reinterpret_i64`** | **`0xfff8…`** | **`0xfff8…`** | **materializa el patron** |
+| `call` (el NaN cruza como argumento) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+| `call_indirect` (a traves de tabla) | `0x7ff8…` | `0x7ff8…` | canonicaliza |
+
+**Respuestas directas a las preguntas que §2.9.5 dejo abiertas.**
+
+1. **`br_if`, `br_table`, `return` y `call_indirect` NO anaden canales.** Todos canonicalizan.
+   Los frames de control cierran con `emit_return_values`, que restaura la marca; y la
+   frontera de llamada canonicaliza los argumentos float antes de invocar
+   (`codegen.rs:2307-2314`: *"Canonicalization state will be lost across function calls, so
+   early canonicalization is necessary here"*). `call_indirect` se comporta igual que `call`.
+2. **No hay canonicalizacion condicional que produzca divergencia DENTRO del mismo nodo.**
+   La regla es uniforme: se canonicaliza si y solo si la marca sigue pendiente. Los operadores
+   que *parecian* condicionales (`select`, `f64.copysign`) solo dependen de la marca del
+   operando, y por eso se comportan distinto segun de donde venga el valor — pero eso es
+   determinista, no una bifurcacion dentro de un nodo.
+3. **Los seis canales que escapan se reducen a dos primitivas**: el `else` implicito (el bug)
+   y `f64.load` / `f64.reinterpret_i64` (que producen valores con la marca ya perdida por
+   construccion).
+
+**El corolario que si importa (y no estaba en el informe).** El caso `f64.load` + `f64.store`
+muestra que **el patron crudo, una vez escrito en el estado, es permanente**: `f64.load` lo
+devuelve con la marca perdida, y a partir de ahi el escape se propaga incluso por operadores
+que son seguros cuando la marca esta pendiente — `select` y `f64.copysign` lo dejan pasar.
+Es decir: **un solo contrato con el `else` implicito que escriba el NaN en su estado envenena
+esa parte del estado para siempre**, y el veneno se propaga por cualquier ruta que lo lea.
+
+> **Correccion de §2.9.5.** Su formulacion —"el NaN crudo sobrevive mientras no vuelva a pasar
+> por un `if`" y "`select` no canonicaliza"— es **imprecisa**. La regla real es la de la marca
+> pendiente: `select` **si** canonicaliza el operando elegido *si su marca sigue pendiente*, y
+> `f64.copysign` **no** canonicaliza nunca (es una operacion de bits: con `+1.0` borra el signo
+> y el patron resultante coincide con el canonico por casualidad; con `-1.0` el patron crudo se
+> ve intacto). La matriz de arriba es la referencia; §2.9.5 debe leerse con ella.
+
+#### 2.9.9 Divergencia de `query` entre arquitecturas: manipulacion de oraculo
+
+El vector que faltaba: un contrato de terceros con el patron `f64` + NaN + `else` implicito,
+consultado contra un nodo x86-64 y contra un nodo AArch64, **devuelve valores distintos**.
+No hay halt, no hay fork, no hay stake: es una contradiccion entre dos respuestas honestas.
+
+**Primero, una correccion de fondo.** La tabla de §2.9.6 (`query` implicito / `execute`
+explicito = 900 / 1000, etc.) **no** es una divergencia `query`/`execute`: es una
+divergencia **`else` implicito / `else` explicito**, y las dos filas de control
+(`900/900` y `1000/1000`) demuestran que `query` y `execute` coinciden siempre. Ese eje no
+sirve para el oraculo: hace falta la dimension **arquitectura**, que §2.9.6 no media.
+
+**La cadena, con las tres patas medidas por separado.**
+
+1. **MEDIDO (nativo, x86-64):** `SQRTSD(-1.0)` produce el *"real indefinite"*
+   `0xFFF8000000000000` (`nan_isa_probe.py`).
+2. **MEDIDO (emulacion ARM64):** `FSQRT(-1.0)` produce el NaN por defecto
+   `0x7FF8000000000000` (`nan_isa_probe.py`). **La misma operacion invalida produce bits
+   distintos en cada ISA.**
+3. **MEDIDO (`nan_operator_matrix.py`):** el `else` implicito deja pasar el patron tal cual, y
+   los puntos de canonicalizacion estan en `codegen.rs`, **compartido por las dos
+   arquitecturas** (`canonicalize_nan` es una funcion de maquina, pero *donde* se llama es
+   comun).
+
+De las tres se sigue: en x86-64 el valor que escapa es `0xFFF8…` y en AArch64 es
+`0x7FF8…` — porque alli `sqrt(-1.0)` ya produce el canonico. La rama del contrato se toma
+distinta y **el precio cambia**.
+
+**La magnitud, medida.** `nan_oracle_probe.py` construye el contrato y mide el extremo x86-64;
+el extremo AArch64 se deriva de (1) y (2):
+
+| contrato | x86-64 | AArch64 | divergencia |
+|---|---|---|---|
+| precio 900 vs 1000 | 900 | 1000 | 10,0 % |
+| precio 0 vs 1.000.000 | 0 | 1.000.000 | **100 %** |
+| precio 1 vs 2 | 1 | 2 | 50 % |
+
+**La magnitud la elige el contrato**: va del 0 % al 100 %. Un contrato cuyo precio sea 0 en
+una rama y 1.000.000 en la otra es un oraculo con una desviacion del 100 % entre nodos de
+distinta arquitectura.
+
+**Lo que hace falta (son condiciones, no mecanismos).**
+
+1. Un contrato de **terceros** con el patron `f64` + NaN + `else` implicito. Nada malicioso:
+   el codigo fuente es correcto; el compilador falla. El atacante no escribe ese contrato.
+2. Un **consumidor que no mediana**: que consulte un nodo y liquide contra otro, o que
+   consulte varios nodos y se quede con una respuesta.
+3. **Dos arquitecturas distintas al alcance**. Los RPC de fetchd son publicos, asi que el
+   atacante elige a quien pregunta; pero la existencia de nodos AArch64 con el mismo contrato
+   es la misma precondicion **no verificada** de §2.9.7 (el hardware recomendado en
+   `docs/docs/validators/overview.md` es exclusivamente x86-64).
+
+**Lo que este vector NO es.**
+
+* **No es un split de consensus.** Una `query` no cambia el estado: la divergencia de §2.9.7
+  (que si llega al app hash) requiere `execute`. Este vector es **off-chain**.
+* **No es el robo del §2.9.6.** Alli el contrato del atacante se autocita con dos formas
+  distintas; aqui el contrato es de un tercero y el atacante solo elige a quien pregunta.
+* **No es un fallo del protocolo.** Los dos nodos responden correctamente segun su
+  arquitectura; el problema es que **el mismo contrato tiene dos respuestas legitimas** y
+  nadie lo media.
+
+**Limites honestos de la medicion.**
+
+* La ejecucion **end-to-end en ARM** no se ha hecho: no hay un entorno de ejecucion ARM en el
+  entorno de auditoria (no hay `qemu-user`, no hay compilador cruzado y el repositorio de
+  Debian no es accesible). La conclusion es una **derivacion** de (1)+(2)+(3), no una
+  ejecucion medida en AArch64.
+* El emulador ARM64 disponible (Unicorn 2.1.4) **no implementa** la regla "Default NaN"
+  (`FPCR.DN`) para `FMAX`: el registro se puede escribir, pero la instruccion lo ignora. Por
+  tanto **no verifica** la ruta de canonicalizacion de ARM64 (`machine_arm64.rs:2229`). Esto no
+  cambia la conclusion, porque la divergencia nace en el valor de partida (`FSQRT`), no en la
+  canonicalizacion; pero conviene no presentarlo como medido.
+* El binario AArch64 **si** se distribuye (`.audit/pwv/internal/api/libwasmvm.aarch64.so`) y el
+  `Makefile` de fetchd verifica el SHA256 del wasmvm **por arquitectura**, asi que la
+  plataforma ARM es soportada. Lo que no esta verificado es que la red *operada* tenga
+  validadores ARM.
+
+**Mitigaciones practicas, en orden de coste.**
+
+1. **Parchear el compilador** (el fix upstream `e5ca9b9`): es la unica que elimina la raiz.
+2. **Que el consumidor mediane**: comparar la respuesta de al menos dos nodos y descartar las
+   discrepantes, o fijar de antemano que se consulta y se liquida contra el mismo nodo.
+3. **Filtrar los contratos nuevos por gobernanza** (`CodeUploadAccess`): corta el vector en su
+   primer eslabon, aunque exige que el contrato problemático no sea anterior a la medida.
 
 ### 2.10 La configuracion efectiva en fetchd, verificada extremo a extremo
 
@@ -1433,6 +1625,22 @@ Fuentes de referencia obtenidas para esta auditoría:
 
 ## 6. Limitaciones de esta auditoría
 
+* **No hay ejecucion end-to-end en AArch64.** El entorno de auditoria no dispone de
+  `qemu-user`, de compilador cruzado, ni de repositorio de Debian accesible; el emulador ARM64
+  disponible (Unicorn 2.1.4) **no implementa** la regla "Default NaN" (`FPCR.DN`) para `FMAX`
+  (el registro se puede escribir, pero la instruccion lo ignora), de modo que **no verifica**
+  la ruta de canonicalizacion de ARM64 (`machine_arm64.rs:2229`). La conclusion cross-arquitectura
+  de §2.9.9 es por tanto una **derivacion** de tres piezas medidas por separado — (a) `SQRTSD(-1.0)`
+  y `FSQRT(-1.0)` producen bits distintos, medido en cada ISA; (b) los canales de escape estan
+  en `codegen.rs`, compartido por ambas arquitecturas; (c) la matriz de operadores, medida en
+  x86-64 — y **no** una ejecucion medida en AArch64.
+* **La arquitectura del set de validadores de fetchd no esta verificada.** ARM es plataforma
+  soportada (SHA256 por arquitectura en el `Makefile`, `arm64` en `musl.Dockerfile`, el `.so`
+  AArch64 se distribuye), pero no hay genesis ni set de validadores publico en el repositorio,
+  y el hardware recomendado en `docs/docs/validators/overview.md` es exclusivamente x86-64.
+  **Ninguno de los dos vectores cross-arquitectura (§2.9.7 y §2.9.9) puede afirmarse sobre la
+  red fetchd sin ese dato.**
+
 * No se ha construido un nodo fetchd completo ni se ha reproducido el fallo a nivel de
   cadena; todas las conclusiones de alcance se derivan del código del SDK
   (`abci_utils.go`, `consensus_params`) y de los genesis de fetchhub, más la medición
@@ -1474,7 +1682,12 @@ Fuentes de referencia obtenidas para esta auditoría:
   `branch` (con un valor **distinto**, el caso que el test upstream no puede distinguir),
   `unreachable`, `nested` y `f32`, con **0 desviaciones**; y `blocktype_probe.py` (§2.9.4)
   demuestra que la superficie alcanzable no se puede ampliar por la via del *block type*.
-  **Siguen sin cubrir:** `select`, `memory.copy` con direcciones solapadas, y bloques con
+  **Cerrado para los operadores de control y de datos:** §2.9.8 mide **30 constructos**
+  (`if` implicito/explicito, `select`, `br_if`, `br`, `br_table`, `return`, `block`, `loop`,
+  `call`, `call_indirect`, `local.get/set/tee`, `global.get/set`, `f64.load/store`,
+  `f64.copysign`, `f64.max`, `f64.min`, `f64.reinterpret_i64`) sobre el `.so` de produccion:
+  `br_if`, `br_table`, `return` y `call_indirect` **canonicalizan** y **no** anaden canales.
+  **Siguen sin cubrir:** `memory.copy` con direcciones solapadas, y bloques con
   parametros de tipos **mixtos** (`i32`+`i64`), que son **inalcanzables** en produccion: un `if`
   sin `else` exige `[t*] -> [t*]`, y con `max_function_results = 1` eso obliga a un unico
   parametro y un unico resultado del mismo tipo.

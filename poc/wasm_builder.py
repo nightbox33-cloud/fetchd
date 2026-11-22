@@ -117,6 +117,20 @@ def op_call(idx):
     return b"\x10" + uleb(idx)
 
 
+def op_call_indirect(type_idx, table_idx=0):
+    """call_indirect: 0x11 typeidx tableidx."""
+    return b"\x11" + uleb(type_idx) + uleb(table_idx)
+
+
+def op_return():
+    return b"\x0f"
+
+
+def op_br_table(targets, default):
+    """br_table: 0x0E vec(labelidx) labelidx."""
+    return b"\x0e" + vec([uleb(t) for t in targets]) + uleb(default)
+
+
 def op_drop():
     return b"\x1a"
 
@@ -177,6 +191,34 @@ def op_f64_add():
 
 def op_f64_div():
     return b"\xa7"
+
+
+def op_f64_copysign():
+    return b"\xa6"
+
+
+def op_f64_max():
+    return b"\xa4"
+
+
+def op_f64_min():
+    return b"\xa5"
+
+
+def op_f64_eq():
+    return b"\x61"
+
+
+def op_f64_ne():
+    return b"\x62"
+
+
+def op_i64_load(offset=0, align=3):
+    return b"\x29" + uleb(align) + uleb(offset)
+
+
+def op_f64_load(offset=0, align=3):
+    return b"\x2b" + uleb(align) + uleb(offset)
 
 
 def op_i64_reinterpret_f64():
@@ -267,7 +309,9 @@ class Module:
         self.funcs = []       # list[(type_idx, locals, body)]
         self.exports = []     # list[(name, kind, index)]
         self.memories = []    # list[(min, max|None)]
+        self.tables = []      # list[(min, max|None)]
         self.globals = []     # list[(valtype, mutable, init_expr)]
+        self.elems = []       # list[(table_idx, offset, [func_idx...])]
         self.data = []        # list[(offset, bytes)]
         self.imports = []     # list[(module, field, type_idx)]
         self._type_cache = {}
@@ -312,6 +356,17 @@ class Module:
         self.globals.append((valtype, mutable, init))
         return gidx
 
+    def add_table(self, minimum, maximum=None, export=None):
+        tidx = len(self.tables)
+        self.tables.append((minimum, maximum))
+        if export:
+            self.exports.append((export, 0x01, tidx))
+        return tidx
+
+    def add_elem(self, table_idx, offset, func_idxs):
+        """An active element segment filling `func_idxs` at `offset`."""
+        self.elems.append((table_idx, offset, list(func_idxs)))
+
     def add_data(self, offset, payload):
         self.data.append((offset, payload))
 
@@ -343,6 +398,15 @@ class Module:
             entries = [uleb(t) for (t, _, _) in self.funcs]
             self._section(out, 3, uleb(len(entries)) + b"".join(entries))
 
+        if self.tables:
+            entries = []
+            for mn, mx in self.tables:
+                if mx is None:
+                    entries.append(b"\x70\x00" + uleb(mn))
+                else:
+                    entries.append(b"\x70\x01" + uleb(mn) + uleb(mx))
+            self._section(out, 4, uleb(len(entries)) + b"".join(entries))
+
         if self.memories:
             entries = []
             for mn, mx in self.memories:
@@ -363,6 +427,15 @@ class Module:
             for nm, kind, idx in self.exports:
                 entries.append(name(nm) + bytes([kind]) + uleb(idx))
             self._section(out, 7, uleb(len(entries)) + b"".join(entries))
+
+        if self.elems:
+            entries = []
+            for (tidx, off, funcs) in self.elems:
+                entries.append(
+                    b"\x00" + op_i32_const(off) + op_end()
+                    + vec([uleb(f) for f in funcs])
+                )
+            self._section(out, 9, uleb(len(entries)) + b"".join(entries))
 
         if self.funcs:
             entries = []
