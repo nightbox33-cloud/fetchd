@@ -183,6 +183,13 @@ Medida de la fuga (búsqueda binaria del umbral, `trigger_shape.py`):
 La fuga es **exactamente 8 bytes por ejecución de `if`** y escala linealmente con el número
 de `if` por iteración. El control con `else` explícito **nunca** agota la pila.
 
+> **Nota sobre los umbrales.** Los 131 028 de esta tabla son los de la forma *de trampa
+> limpia* (la llamada está **dentro** del bucle, con `prefix = 4`). La forma *fatal* de §2.8
+> —bucle sin llamada y `call` posterior— tiene un módulo distinto y por tanto un marco de pila
+> inicial distinto: su umbral medido es **131 539** (§2.8.3). La diferencia de 511 iteraciones
+> (~0,4 %) es geometría del módulo, no un cambio en el mecanismo: la fuga sigue siendo
+> exactamente 8 bytes por `if`.
+
 Matriz upstream completa contra el `.so` de producción (400 000 iteraciones), reproducida
 con el test de regresión upstream reconstruido **byte a byte** en Wasm crudo
 (`upstream_faithful.py`):
@@ -531,7 +538,8 @@ justa: es lo que hace que el `if` reserve un *slot* de pila que la ruta falsa no
 
 > **Lo que NO es.** Esto **no** es ejecucion arbitraria de codigo, ni robo de fondos, ni
 > corrupcion de memoria del estado de la cadena: es una **denegacion de servicio que mata el
-> proceso**. La investigacion de una via de exfiltracion o de manipulacion del flujo de control
+> proceso** —y, por donde se ejecuta (§2.8.6), una **detencion de la cadena completa**. La
+> investigacion de una via de exfiltracion o de manipulacion del flujo de control
 > sigue **abierta** y se documenta por separado en §2.9 y §5.
 
 #### 2.8.6 El alcance real no es un nodo: es un **halt de cadena**
