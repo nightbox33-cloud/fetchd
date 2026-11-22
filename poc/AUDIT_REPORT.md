@@ -22,6 +22,15 @@
 en producción y que **no está parcheado en ninguna release de Wasmer**. El disparador es
 **permissionless, trivial de construir y muy barato**.
 
+La cadena completa esta verificada en **§2.10**: fetchd fija `priv_wasmvm_sec v3.0.8-rc.3`
+(commit `d89faf18`) -> `cosmwasm-vm 3.0.10-rc.3` -> `wasmer 7.4.2`, donde **Singlepass es el
+único compilador presente** (`make_compiler_config()` -> `wasmer::sys::Singlepass::new()`, y el
+lockfile no contiene Cranelift ni LLVM). Por tanto **no hay mitigación por cambio de
+compilador**, y la canonicalización de NaN está **activa por defecto** en el binario que el nodo
+carga. Los limites de validacion se quedan en sus defaults (`max_function_results = 1`), lo que
+acota la superficie a `if (param T)(result T)`, y `CodeUploadAccess = AllowEverybody` hace que
+**cualquier cuenta** pueda llegar al disparador.
+
 - **Como trampa limpia** (~7 754 gas de SDK, 258× de holgura): el VM aborta la ejecución con
   `call stack exhausted`, la transacción falla y el estado se revierte. No hay pérdida de fondos,
   pero **rompe cualquier contrato legítimo** que ejecute más de ~131 000 `if` con `else`
@@ -642,11 +651,13 @@ distinguir— **funciona correctamente**: `Operator::Br` tambien llama a `emit_r
 
 #### 2.9.4 La superficie alcanzable en produccion es muy estrecha
 
-El validador estatico de CosmWasm **rechaza los tipos de funcion con mas de un resultado**
-(error medido: *"Wasm contract contains function with more than 1 results"*), y por tanto
-tambien rechaza los bloques multi-resultado. Como un `if` sin `else` exige que los parametros
-del bloque coincidan con sus resultados, y un `if` con cero parametros y un resultado es Wasm
-invalido, la **única forma de `if` con `else` implicito que puede llegar a produccion** es:
+El limite `max_function_results` de `cosmwasm-vm` esta en **1** por defecto, y fetchd no lo
+cambia (§2.10). El validador estatico de CosmWasm **rechaza los tipos de funcion con mas de un
+resultado** (error medido: *"Wasm contract contains function with more than 1 results"*;
+`cosmwasm-vm/packages/vm/src/compatibility.rs:313`), y por tanto tambien rechaza los bloques
+multi-resultado. Como un `if` sin `else` exige que los parametros del bloque coincidan con sus
+resultados, y un `if` con cero parametros y un resultado es Wasm invalido, la **única forma de
+`if` con `else` implicito que puede llegar a produccion** es:
 
 ```wat
 if (param T) (result T)      ;; T ∈ { i32, i64, f32, f64 }
@@ -656,11 +667,128 @@ Esto acota mucho la superficie: no hay bloques con parametros de tipos distintos
 un parametro, ni bloques con `f32`/`f64` mixtos. La matriz de §2.9.3 cubre las variantes
 relevantes de esa superficie, y la de §2.9.2 el caso de coma flotante.
 
+El limite vive en la **configuracion del nodo**, no en los parametros *on-chain*: un operador
+que quisiera ampliar la superficie tendria que cambiar `wasmtypes.VMConfig{}` en
+`app/app.go:709` y recompilar. En el estado actual del repositorio no hay ninguna via
+*on-chain* para relajarlo.
+
 **Lo que queda abierto:** `i32` con `enable_nan_canonicalization` no aplica (solo afecta a
 floats); los bloques `(param i32)(result i32)` se comportan como los de `i64` (mismo tipo de
 slot de 8 bytes). No se ha encontrado ninguna desviacion de valor en la superficie alcanzable.
 
-### 2.10 Impacto
+### 2.10 La configuracion efectiva en fetchd, verificada extremo a extremo
+
+Todo lo anterior se ha medido sobre el binario que fetchd carga de verdad. Esta seccion
+cierra la cadena: **que version del stack ejecuta el nodo, que compilador elige, que limites
+aplica y quien puede llegar al disparador.** Cada dato viene del codigo fuente del
+repositorio y del commit exacto que el `go.mod` de fetchd fija.
+
+**Cadena de versiones.** El `go.mod` de fetchd sustituye ambos componentes de CosmWasm por
+forks privados de fetch.ai:
+
+```go
+// fetchd/go.mod
+replace (
+    github.com/CosmWasm/wasmd    => github.com/fetchai/priv_wasmd_sec   v0.61.15-rc.3  // ab17af8e72692541e5eb1b57c2d5480ed8084300
+    github.com/CosmWasm/wasmvm/v3 => github.com/fetchai/priv_wasmvm_sec/v3 v3.0.8-rc.3   // d89faf180d3fb5de09b4ba59099844cc0a7a2632
+)
+```
+
+En ese commit `d89faf18` de `priv_wasmvm_sec`, el `Cargo.lock` fija:
+
+| componente | version |
+|---|---|
+| `cosmwasm-vm` | `3.0.10-rc.3` (fork `CosmWasm/priv_cosmwasm`, tag `v3.0.10-rc.3`) |
+| `wasmer` | `7.4.2` |
+| `wasmer-compiler-singlepass` | `7.4.2` |
+| `wasmer-compiler-cranelift` | **ausente** |
+| `wasmer-compiler-llvm` | **ausente** |
+
+**Singlepass es el unico compilador que puede usar el nodo.** No es una opcion: en
+`cosmwasm-vm` el motor se construye asi:
+
+```rust
+// cosmwasm-vm/packages/vm/src/wasm_backend/engine.rs:53
+pub fn make_compiler_config() -> impl CompilerConfig + Into<Engine> {
+    wasmer::sys::Singlepass::new()
+}
+```
+
+(El propio test upstream lo afirma: `assert_eq!(cc.compiler().name(), "singlepass")`.) Por tanto
+**no existe mitigacion por cambio de compilador**: Cranelift y LLVM, que canonicalizan distinto
+o no canonicalizan, no estan presentes en el binario.
+
+**La canonicalizacion de NaN esta activa en produccion.** `Singlepass::new()` construye la
+configuracion con el default, que la activa:
+
+```rust
+// wasmer 7.4.2, lib/compiler-singlepass/src/config.rs:102
+enable_nan_canonicalization: true,
+```
+
+(En Cranelift el default es `false`, `config.rs:133`.) Esto confirma que el hallazgo de §2.9.2
+no es una rareza de laboratorio: es exactamente el modo en que el nodo ejecuta los contratos.
+
+**Los limites de validacion estan en su default.** fetchd construye el VM con la configuracion
+vacia:
+
+```go
+// fetchd/app/app.go:709
+wasmtypes.VMConfig{},
+```
+
+`types.VMConfig` solo contiene `WasmLimits`, y `NodeConfig` no lo incluye, asi que **todos los
+limites toman el valor por defecto de `cosmwasm-vm`**:
+
+| limite | default | efecto |
+|---|---|---|
+| `max_function_results` | **1** | un bloque `if` solo puede tener 1 resultado |
+| `max_function_params` | 100 | parametros por bloque/funcion |
+| `max_function_locals` | 100 | locales por funcion |
+| `max_functions` | 20 000 | funciones por modulo |
+| `max_imports` | 100 | imports por modulo |
+
+El limite `max_function_results = 1` es la razon exacta del error *"Wasm contract contains
+function with more than 1 results"* que se midio en §2.9.4, y es lo que acota la superficie a
+`if (param T)(result T)`. No es un limite *on-chain*: vive en la configuracion del nodo, y en
+fetchd esta hardcodeada —subirla exigiria recompilar el binario del nodo.
+
+**Los limites de memoria no protegen el stack nativo.** `contractMemoryLimit = 32` MiB se aplica
+como `InstanceMemoryLimitBytes`, es decir, a la memoria *Wasm del contrato*. El stack que se
+agota en §2.8 es el **stack nativo del JIT de Wasmer** (1 MiB, con guard page), que no es la
+memoria del guest y no esta sujeto a ese limite. Por eso el fallo aparece como `SIGSEGV` y no
+como un error de gas o de memoria.
+
+**El disparador es permissionless.** Los parametros por defecto del modulo `wasm` de wasmd son:
+
+```go
+// wasmd v0.61.x, x/wasm/types/params.go:87
+func DefaultParams() Params {
+    return Params{
+        CodeUploadAccess:             AllowEverybody,
+        InstantiateDefaultPermission: AccessTypeEverybody,
+    }
+}
+```
+
+`CodeUploadAccess = AllowEverybody` significa que **cualquier cuenta puede subir un contrato
+Wasm y ejecutarlo**; no hace falta permiso de gobernanza ni de lista blanca. La unica requisito es
+pagar el gas de la transaccion, que para la forma fatal de §2.8 es **4 652 gas de SDK**
+(§2.8.5), frente a un techo de bloque de 2 000 000 gas.
+
+En resumen, la cadena de ataque verificada es:
+
+```
+cualquier cuenta
+  -> StoreCode (AllowEverybody)          -> un Wasm de ~1 KiB
+  -> InstantiateContract                  -> ejecuta `instantiate`
+  -> el `else` implicito en bucle          -> 8 bytes de stack por iteracion
+  -> 131 539 iteraciones                  -> 4 652 gas de SDK
+  -> guard page del stack nativo de Wasmer-> SIGSEGV
+  -> muerte del proceso del nodo
+```
+
+### 2.11 Impacto
 
 **Sobre la cadena:** la transaccion atacante **no** se aplica (el estado se revierte), pero el
 **proceso del nodo muere** (§2.8). Es una parada del nodo reproducible y permissionless, al
@@ -682,7 +810,7 @@ resultado flotante dependa de la CPU. El efecto medido es una **ramificacion div
 estado distinto del contrato (§2.9.2): es un vector de **divergencia de app hash**, no de robo.
 La hipotesis de *exfiltracion* de datos mediante esta via sigue sin demostrarse.
 
-### 2.11 Recomendacion
+### 2.12 Recomendacion
 
 1. **Backport del fix upstream** `e5ca9b938` a la rama de Singlepass 7.4.2 usada por
    `priv_wasmvm_sec`, o migrar a una release de Wasmer que lo contenga cuando exista.

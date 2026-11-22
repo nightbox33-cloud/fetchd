@@ -90,6 +90,18 @@ el `SP` está fuera de la pila Wasm; el manejador de señales restaura entonces 
 vuelve, de modo que la instrucción que falló se re-ejecuta y el proceso muere. Ése es
 precisamente el mecanismo que convierte la fuga de Singlepass en una muerte de proceso.
 
+**Configuración efectiva de fetchd (§2.10).** La cadena verificada es
+`fetchd` → `priv_wasmvm_sec v3.0.8-rc.3` (commit `d89faf18`) → `cosmwasm-vm 3.0.10-rc.3` →
+`wasmer 7.4.2`, donde **Singlepass es el único compilador presente** (`make_compiler_config()`
+→ `wasmer::sys::Singlepass::new()`; el lockfile no contiene Cranelift ni LLVM) → **no hay
+mitigación por cambio de compilador**. `Singlepass::new()` activa
+`enable_nan_canonicalization: true` por defecto, así que el hallazgo de NaN aplica al binario que
+el nodo carga. fetchd construye el VM con `wasmtypes.VMConfig{}` (`app/app.go:709`), de modo que
+los límites de validación quedan en sus defaults —en particular `max_function_results = 1`, que
+es lo que acota la superficie a `if (param T)(result T)`—. Y `CodeUploadAccess = AllowEverybody`
+(wasmd `DefaultParams`) significa que **cualquier cuenta** puede subir el contrato y llegar al
+disparador.
+
 **La canonicalización de NaN también se pierde (§2.9.2).** Singlepass la activa por defecto
 (`enable_nan_canonicalization: true`), pero la difiere: `f64.sqrt/floor/ceil/trunc/nearest` y las
 aritméticas marcan el resultado y lo canonicalizan **al salir de la función**
