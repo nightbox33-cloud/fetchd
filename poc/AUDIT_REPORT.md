@@ -974,7 +974,9 @@ atacante se lleva.
 4. **La via que el bug si crea y el atacante no puede evitar es la heterogeneidad de
    arquitectura** (§2.9.2, consecuencia 1): un contrato que ramifique sobre los bits del NaN
    produce **un estado en x86-64 y otro en AArch64**. La consecuencia primaria es un **split de
-   consensus** y hay que analizarlo con cuidado: §2.9.7 lo hace.
+   consensus** — y no un simple "votan estados distintos": en CometBFT el app hash va en el
+   *header* del bloque, asi que los dos grupos **rechazan mutuamente** los bloques del otro
+   (§2.9.7 lo demuestra con referencias al codigo).
 
 **Veredicto.** El defecto **no es un robo permissionless por si mismo**, y presentarlo como tal
 seria exagerar. Lo que es:
@@ -1057,14 +1059,42 @@ diferencia estructural con el patron de 2017 en Bitcoin, donde las dos ramas son
 minadas y un exchange minaba en las dos; en CometBFT PoS las dos compiten por la misma altura y
 solo una finalize.
 
+**El mecanismo exacto en CometBFT (v0.38.21, la version que fija `go.mod`).** La consecuencia no
+es "los dos grupos votan estados distintos": es **rechazo mutuo de bloques**, y se deriva de
+cinco hechos verificados en el codigo:
+
+| # | hecho verificado | referencia |
+|---|---|---|
+| 1 | el proposer mete **su app hash local** en el **header** del bloque | `state/state.go:258` — `block.Populate(..., state.AppHash, ...)` |
+| 2 | el estado local del nodo toma el hash que devuelve la app | `state/execution.go:304` — `state.AppHash = abciResponse.AppHash` |
+| 3 | **un nodo cuyo app hash local difiere RECHAZA el bloque**, antes incluso de ejecutarlo | `state/validation.go:54` — `if !bytes.Equal(block.AppHash, state.AppHash) { return error }` |
+| 4 | el camino de *block sync* **salta** esa validacion (`ApplyVerifiedBlock`), asi que el nodo se aplica los bloques canonicos pero calcula otro app hash | `blocksync/reactor.go:549`; `state/execution.go:732` — *"executes and commits a block ... without validating"* |
+| 5 | al re-ejecutar un bloque, si el app hash no cuadra con el header, **el nodo hace `panic`** | `consensus/replay.go:545` — `assertAppHashEqualsOneFromBlock` |
+
+La secuencia, paso a paso:
+
+1. En la altura `H-1` se ejecuta el contrato divergente. El grupo x86-64 obtiene el app hash
+   `X_x86`; el grupo AArch64 obtiene `X_A`. `X_x86 != X_A`.
+2. En la altura `H` el proposer construye el bloque con **su** app hash en el header
+   (`state.go:258`). Si el proposer es x86-64, el header lleva `X_x86`.
+3. El validador AArch64 recibe ese bloque y lo **rechaza**: `validation.go:54` compara
+   `block.AppHash` (`X_x86`) con su `state.AppHash` (`X_A`) y falla. **No lo ejecuta, no vota.**
+4. Si el proposer es AArch64, el header lleva `X_A` y son los nodos x86-64 los que lo rechazan.
+   Los dos grupos **no pueden coincidir en ningun bloque**, y ademas el hash del bloque es
+   distinto en cada rama: el split es a nivel de **hash de bloque**, no solo de estado.
+5. El nodo minoritario, ademas, **no puede hacer catch-up**: por el camino de *block sync* si aplica los
+   bloques canonicos (punto 4 de la tabla), pero su app hash local sigue siendo `X_A`, asi que
+   vuelve a estar en la situacion del paso 3. Su stake queda **muerto de forma permanente**.
+
 **Lo que si es grave (y es mas que un doble gasto).**
 
-1. **Atasco permanente del grupo minoritario.** Un nodo ARM que recalcula el bloque divergente
-   obtiene un app hash distinto: **no puede sincronizar nunca** y entra en crash-loop de
-   resync. Su stake queda inoperante.
-2. **Halt si el stake atascado supera 1/3.** La rama mayoritaria deja de alcanzar 2/3 del stake
-   *total* y la cadena se detiene. Y el atacante puede **repetir** el ataque — desplegar otro
-   contrato divergente — para **mantener** el halt de forma permissionless.
+1. **Atasco permanente del grupo minoritario.** Verificado arriba: el nodo minoritario rechaza
+   todos los bloques canonicos y no puede resincronizar nunca. Su stake queda inoperante y el
+   grupo mayoritario no puede recuperarlo.
+2. **Halt si el stake atascado supera 1/3.** Los nodos atascados no votan, de modo que la rama
+   mayoritaria deja de alcanzar 2/3 del stake *total* y la cadena se detiene en esa altura. Y el
+   atacante puede **repetir** el ataque — desplegar otro contrato divergente — para **mantener**
+   el halt de forma permissionless.
 3. **Ventana de robo por congelamiento.** Durante el halt hay dos historiales candidatos, los
    precios *off-chain* siguen moviendose y las operaciones de los usuarios (liquidaciones, swaps
    abiertos, prestamos) quedan congeladas. Ese es el hueco donde un atacante puede operar con
@@ -1074,12 +1104,33 @@ solo una finalize.
    >1/3 el atacante bloquea la resolucion y la comunidad adopta su rama. Y ahi el defecto aporta
    el **trigger** (el halt permissionless), no el poder de veto — que hay que comprarlo.
 
+**La precondicion que NO esta verificada (y es la que decide si esto es explotable).** Todo lo
+anterior exige que **exista un grupo minoritario AArch64 con voting power real**. Lo que esta
+verificado:
+
+| afirmacion | estado | evidencia |
+|---|---|---|
+| ARM es una plataforma soportada por el proyecto | **medido** | `Makefile` verifica el SHA256 del wasmvm **por arquitectura** (`WASMVM_SHA256_x86_64` / `WASMVM_SHA256_aarch64`); `musl.Dockerfile` construye `--platform linux/amd64,linux/arm64` |
+| el binario AArch64 existe y se distribuye | **medido** | `libwasmvm.aarch64.so` y `libwasmvm_muslc.aarch64.a.xz` en `priv_wasmvm_sec/internal/api/` |
+| la arquitectura del **set de validadores real** de fetchd | **NO verificado** | no hay genesis ni set de validadores publico en el repo |
+| el hardware recomendado para validadores | **medido, y juega en contra** | `docs/docs/validators/overview.md`: *"2 x CPU, either Intel or AMD, with the SSE4.1, SSE4.2 and AVX flags"* — orientacion **exclusivamente x86** |
+
+Es decir: el defecto **no necesita** heterogeneidad para existir (el `else` explicito es la
+mitigacion correcta y no depende de la arquitectura), pero el **ataque a nivel de cadena** si la
+necesita. Con un set de validadores 100 % x86-64, el split no se produce: todos los nodos
+ejecutan el mismo codigo, todos obtienen el mismo app hash, y lo que queda es la divergencia
+`query`/`execute` de §2.9.6 — un problema de contabilidad, no de consensus. **El reporte no puede
+afirmar que la red fetchd sea vulnerable a esto**, porque la distribucion de arquitecturas del
+set de validadores no es publica ni verificable desde aqui.
+
 **Veredicto corregido.** El defecto es un **generador permissionless de splits de consensus** y,
-por tanto, de halts y de atasco de validadores. El **doble gasto directo por split no es
-realizable en CometBFT** por la razon verificada arriba. El riesgo financiero real es el
-**congelamiento durante el halt** y la **resolucion social** de un halt con dos historiales
-validos. Y la accion operativa inmediata sigue siendo la misma: **filtrar los contratos
-nuevos por gobernanza** (`CodeUploadAccess`), que corta la cadena en su primer eslabon.
+por tanto, de halts y de atasco de validadores, *si* el set de validadores es heterogeneo. El
+**doble gasto directo por split no es realizable en CometBFT** por la razon verificada arriba. El
+riesgo financiero real es el **congelamiento durante el halt** y la **resolucion social** de un
+halt con dos historiales validos. Y la accion operativa inmediata sigue siendo la misma: **filtrar
+los contratos nuevos por gobernanza** (`CodeUploadAccess`), que corta la cadena en su primer
+eslabon — y que ademas es la unica mitigacion que funciona **con independencia de cual sea la
+arquitectura del set de validadores**.
 
 ### 2.10 La configuracion efectiva en fetchd, verificada extremo a extremo
 

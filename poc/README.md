@@ -126,8 +126,17 @@ wasmvm **por arquitectura** (ARM es plataforma soportada). El defecto es por tan
 directo* por split **no es realizable en CometBFT** — una rama que no alcanza 2/3 del voting
 power **no ejecuta ninguna transacción** (`FinalizeBlock` es lo único que avanza el estado), así
 que el depósito en la rama perdedora nunca ocurre. Lo grave es el **atasco permanente del grupo
-minoritario** (no pueden resincronizar: su app hash difiere), el **halt** si ese stake supera 1/3,
-y el **congelamiento** durante el halt.
+minoritario** — el app hash va en el *header* del bloque, así que el nodo minoritario
+**rechaza** todos los bloques canónicos (`state/validation.go:54`) y no puede hacer catch-up
+(`blocksync/reactor.go:549` salta la validación pero calcula otro app hash) —, el **halt** si ese
+stake supera 1/3, y el **congelamiento** durante el halt.
+
+**La precondición no verificada.** El ataque a nivel de cadena exige que el set de validadores
+real de fetchd sea heterogéneo (un grupo AArch64 con voting power). ARM es plataforma soportada
+(SHA256 por arquitectura en el `Makefile`, `arm64` en `musl.Dockerfile`), pero la distribución
+de arquitecturas del set de validadores **no es pública ni verificable**, y el hardware
+recomendado en `docs/docs/validators/overview.md` es exclusivamente x86-64. El informe no
+afirma que la red fetchd sea vulnerable a esto.
 
 **La canonicalización de NaN también se pierde (§2.9.2).** Singlepass la activa por defecto
 (`enable_nan_canonicalization: true`), pero la difiere: `f64.sqrt/floor/ceil/trunc/nearest` y las
