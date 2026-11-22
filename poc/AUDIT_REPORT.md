@@ -12,6 +12,7 @@
 |---|----------|--------|----------------------|
 | 1a | Miscompilación de Singlepass (`if` con parámetro de bloque y `else` implícito) presente en producción | **Confirmado, sin parchear** | **Media** — disparador permissionless y barato (**7 754 gas de SDK**); rompe contratos legítimos |
 | 1b | **Escalada de la misma fuga a muerte del proceso del validador** (`SIGSEGV` irrecuperable) | **Confirmado, sin parchear** | **Alta** — disparador permissionless de **4 652 gas de SDK** (430× de holgura) que **mata el proceso** del nodo |
+| 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU y **ramificación divergente** | **Confirmado, sin parchear** | **Media/Alta** — riesgo de **divergencia de app hash** entre arquitecturas y al aplicar el parche |
 | 2 | Respuesta vacía del VM (`res.Ok == nil`) en wasmd | **Resuelto** — ya está en upstream v0.61.15 | Ninguna (guardas presentes) |
 | 3 | Clasificación errónea de fallos por el harness C ABI | **Corregido** en el PoC | Afectaba a reproducciones previas |
 | 4 | Confusión de unidades de gas (puntos de CosmWasm ≠ gas del SDK) en un análisis previo | **Corregido** — ver §2.5 | Invertía la conclusión de alcance |
@@ -29,6 +30,13 @@ en producción y que **no está parcheado en ninguna release de Wasmer**. El dis
   puede escalarse hasta que el `SIGSEGV` sea **irrecuperable**, y el **proceso del validador
   muere con `SIGSEGV`**. Es una denegación de servicio contra el nodo, no una transacción
   fallida.
+- **Como no determinismo de coma flotante** (ver **§2.9.2**): la rama falsa del `else` implícito
+  **se salta la canonicalización de NaN**, de modo que un `f64` NaN conserva el *payload del
+  hardware* (0xFFF8… en x86-64, 0x7FF8… en AArch64) en lugar del patrón canónico. Consecuencia
+  práctica: **el mismo programa da distinto resultado según cómo el compilador emitiera el
+  `if`**, y una red con validadores de arquitecturas distintas puede obtener **app hashes
+  distintos**. Además, **aplicar el fix upstream cambia el resultado** de esos contratos, así que
+  el backport no es semánticamente neutro.
 
 > **Corrección de una versión anterior de este informe.** Una iteración previa de esta auditoría
 > concluyó que el disparador era inalcanzable ("brecha de 543×"). **Era un error de unidades:**
@@ -217,6 +225,38 @@ proceso muere. En las formas medidas hasta aquí **todas las landings observadas
 dentro de la página de guarda**, por lo que la falla es una trampa limpia (§2.7). **§2.8
 documenta una forma que consigue que la landing caiga por debajo de la página de guarda** (con
 `SP < limit`), que es exactamente la condición de irrecuperabilidad.
+
+#### 2.4.1 Differential CFG-aware completo (JIT real de producción)
+
+Los dos módulos (implícito y explícito) producen JIT distintos; el difference se ve en el
+**control de flujo**, no en los valores. Checksums: implícito
+`fabc44e53ab9d96e9aaa1fc0e50f742c40c362b71e389ad29d8b69b36ee9fd3e`, explícito
+`221573d50fe190e4ae791293b4ca2e9b93795152c599e48a688ee04212e84a03`.
+
+| | **implícito** | **explícito** |
+|---|---|---|
+| test de la condición | `0x478  je 0x574` | `0x478  je 0x579` |
+| `0x574` | `sub $0x8,%rsp` — **es la etiqueta de FIN del bloque** | `jmp 0x66f` — el then-arm salta a la etiqueta de FIN |
+| `0x579` | *(no existe: aquí está la etiqueta de FIN)* | `sub $0x8,%rsp` — **el brazo `else`**, con su propio `add $0x8,%rsp` en `0x590` |
+| cleanup `add $0x8,%rsp` en `0x56d` | lo ejecuta **sólo** el then-arm | lo ejecuta **sólo** el then-arm |
+| ruta de la condición falsa | salta a `0x574` **saltándose el `add $0x8,%rsp` de `0x56d`** | entra en `0x579`, región con su propio par `sub`/`add` balanceado |
+
+Es decir: **en la versión rota, la rama falsa salta directamente a la etiqueta de fin y se
+salta el `add $0x8,%rsp` que libera el slot del bloque** → 8 bytes de pila nativa fugados por
+cada ejecución de la rama falsa. En la versión corregida, la rama falsa entra en una región
+(`else`) con su propio par `sub`/`add` y el then-arm ejecuta el cleanup: **la pila queda
+balanceada en ambas ramas**.
+
+Esto corresponde exactamente al diff del fix upstream: el `Operator::End` roto emite
+`emit_label(frame.label)` **antes** de `emit_label(label_else)`, de modo que la ruta que salta
+a `label_else` se salta el `release_locations()` (el `add rsp, N`); el fix introduce
+`emit_if_block_end()`, que emite `jmp_unconditional(frame.label)` **antes** de
+`emit_label(label_else)`, dejando el brazo `else` como una región separada y balanceada.
+
+> **Consecuencia para la escalada (§2.8).** La fuga es *exactamente* este `add $0x8,%rsp`
+> omitido: 8 bytes por iteración, como miden las direcciones de fallo. Y como la omisión
+> ocurre **en el bloque**, la fuga se repite en cada iteración de un bucle, mientras que la
+> operación que la compensa (`add $0x8,%rsp`) está en el camino del `then`.
 
 ### 2.5 Alcance en fetchd — el disparador SÍ es alcanzable
 
@@ -490,9 +530,6 @@ retorno **antes** de la rama (`emit_relaxed_mov`), y el fix upstream la traslada
 semanticamente neutra (los slots se permutan entre si, sin cruzar datos de tipo). Por eso:
 
 - La pila de valores del compilador queda con **una entrada de mas**, no con valores cambiados.
-- El `emit_return_values` de la ruta de retorno es **identico** en ambas versiones, incluida la
-  canonicalizacion de NaN (`CanonicalizeType::None` → `mov` crudo; `enable_nan_canonicalization`
-  no cambia nada aqui).
 - Los slots de la pila de valores se direccionan **relativos a RBP**, asi que la deriva de RSP
   no puede corromperlos.
 
@@ -500,12 +537,128 @@ semanticamente neutra (los slots se permutan entre si, sin cruzar datos de tipo)
 **0 desviaciones en 24 pares** implicito/explicito, y el test de regresion upstream
 `implicit_else_reclaims_inputs` afirma lo mismo para las formas que cubre.
 
-**Lo que esto NO demuestra:** que no exista *otra* forma de bloque (distinta forma, distinto
-tipo de bloque, `br` hacia fuera, `select`, referencia a funcion, `memory.copy` con direcciones
-solapadas) donde la entrada extra de la pila de valores si cambie un valor. Esa busqueda
-**sigue abierta**: la evidencia actual cubre la forma `(param i64) (result i64)` con presion de
-registros; no cubre, por ejemplo, `f32`/`f64` con canonicalizacion activa, bloques con multiples
-parametros de tipos distintos, ni `br` fuera de un `if` cuyo `else` es implicito.
+> **Correccion de una afirmacion anterior de este informe.** Una version previa de §2.9
+> afirmaba que *"la canonicalizacion de NaN no cambia nada aqui"* porque los valores del bloque
+> llevaban `CanonicalizeType::None`. **Es falso**: `CanonicalizeType::None` solo lo llevan los
+> valores que *no* son float (o los `f64.const`); un `f64` producido por una operacion
+> aritmetica lleva la marca `F64`, y la canonicalizacion se difiere hasta la salida de la
+> funcion. Como la rama falsa del `else` implicito **no pasa por `emit_return_values()`**, la
+> canonicalizacion **se pierde**. Ver §2.9.2: es un segundo defecto, de naturaleza distinta
+> (no determinismo), y el mismo fix upstream lo corrige.
+
+#### 2.9.2 La canonicalizacion de NaN se pierde en la rama falsa del `else` implicito
+
+Singlepass activa la canonicalizacion de NaN **por defecto**
+(`lib/compiler-singlepass/src/config.rs:102` → `enable_nan_canonicalization: true`), a diferencia
+de Cranelift y LLVM, donde esta desactivada. El motivo es **critico para el consenso**: el NaN
+canonico (`0x7FF8_0000_0000_0000` para f64, `machine_x64.rs::canonicalize_nan`) hace que el
+resultado de una operacion de coma flotante sea **identico bit a bit en todas las CPUs**, de modo
+que los validadores coincidan en el app hash.
+
+La canonicalizacion es **diferida**: `f64.add`, `f64.sub`, `f64.mul`, `f64.div`, `f64.sqrt`,
+`f64.floor`, `f64.ceil`, `f64.trunc` y `f64.nearest` empujan su resultado con la marca
+`CanonicalizeType::F64` pero **no lo canonicalizan en el sitio**
+(`codegen.rs:1899-1990`); se canonicaliza despues, al salir de la funcion, en
+`emit_return_values()`.
+
+El fix upstream cambia justo ahi:
+
+| | `else` **implicito** (vulnerable) | `else` **explicito** (corregido) |
+|---|---|---|
+| rama verdadera | pasa por `emit_return_values()` → canonicaliza | idem |
+| **rama falsa** | **copia cruda** (`emit_relaxed_mov`), **sin canonicalizar** | pasa por `emit_if_block_end()` → `emit_return_values()` → **canonicaliza** |
+
+**Medido sobre el `.so` de produccion** (`nan_canon_probe.py`), con `f64.sqrt(-1.0)` pasado como
+parametro de bloque y la condicion en `false`:
+
+```
+productor  cond  implicito                          explicito                         juicio
+sqrt       0     0xfff8000000000000 (NaN x86)       0x7ff8000000000000 (canonico)     *** DIFIERE ***
+sqrt       1     0x7ff8000000000000 (canonico)       0x7ff8000000000000 (canonico)     ok
+```
+
+Y la diferencia se traduce en una **ramificacion divergente** (el contrato comprueba los bits del
+float y escribe un estado distinto):
+
+```
+productor  cond  implicito  explicito  juicio
+sqrt       0     1          2          *** RAMIFICACION DIVERGENTE ***
+```
+
+**Confirmacion a nivel JIT** (las secuencias de canonicalizacion son
+`vcmpunordsd` + `vblendvpd`):
+
+| variante | secuencias de canonicalizacion en el JIT |
+|---|---|
+| `else` implicito | **1** (solo la rama verdadera, offset `0x1a4`) |
+| `else` explicito | **2** (`0x1a4` y `0x270`, una por rama) |
+
+**Consecuencias**
+
+1. **No determinismo entrearchitecturas.** El NaN crudo depende de la CPU: x86-64 produce
+   `0xFFF8_0000_0000_0000` (el "real indefinite") y AArch64 produce
+   `0x7FF8_0000_0000_0000`. El `else` implicito deja pasar el valor crudo; el explicito lo
+   canonicaliza. Una red con validadores de arquitecturas distintas (el `.so` de produccion
+   incluye `libwasmvm.aarch64.so`) **puede obtener app hashes distintos para el mismo bloque**.
+   Es exactamente el problema que la canonicalizacion existe para evitar.
+2. **El mismo programa fuente da distinto resultado** segun el compilador haya emitido `if`/`else`
+   o solo `if`: el compilador de Rust/LLVM decide esa forma, no el contrato.
+3. **El parche upstream cambia el comportamiento observable** de los contratos afectados
+   (`0xFFF8…` → `0x7FF8…`): para un contrato que ramifica sobre los bits del float, el app hash
+   cambia al actualizar Wasmer. **El backport del fix no es semanticamente neutro** y hay que
+   auditar los contratos de coma flotante antes de aplicarlo.
+
+**Lo que NO es:** no hay robo de fondos ni corrupcion de la cadena por esta via. Un NaN no se
+puede serializar en JSON (serde_json lo rechaza), asi que el valor no puede almacenarse en el
+estado; lo observable es la *ramificacion* y, con ella, el estado que el contrato decide
+escribir. El vector es de **divergencia de estado/app hash**, no de robo.
+
+**Estado de la evidencia:** *directa* para el comportamiento medido (bits y ramificacion) y
+*directa* para la diferencia de JIT. Que el **fix upstream lo corrija** se deduce del diff
+(`emit_if_block_end` → `emit_return_values` → `canonicalize_nan`): **no** se ha compilado el
+Singlepass parcheado en este entorno, igual que para el resto del informe.
+
+#### 2.9.3 Matriz de formas: la semántica de valores es correcta
+
+El test de regresion upstream solo cubre bloques `(param i64)(result i64)` y su caso *"branch"*
+usa `br 0` con el parametro del bloque en la pila, de modo que el valor esperado **coincide**
+con el parametro: ese caso no puede distinguir una compilacion correcta de una incorrecta**.
+`shape_matrix.py` cubre las formas que faltan, comparando cada una contra su gemelo `else`
+explicito (semanticamente equivalente por construccion) y contra el valor que exige la
+especificacion:
+
+| forma | `else` implicito | `else` explicito | esperado (spec) | juicio |
+|---|---|---|---|---|
+| `passthrough` (el resultado es el parametro) | `0123456789abcdef` | `0123456789abcdef` | `0123456789abcdef` | ok |
+| `replace` (el then-arm reemplaza el parametro) | `0123456789abcdef` | `0123456789abcdef` | `0123456789abcdef` | ok |
+| **`branch`** (`br 0` con un valor **distinto**) | `00000000deadbeef` | `00000000deadbeef` | `00000000deadbeef` | ok |
+| `unreachable` (el then-arm hace trap) | `0123456789abcdef` | `0123456789abcdef` | `0123456789abcdef` | ok |
+| `nested` (un `if` dentro del then-arm) | `0123456789abcdef` | `0123456789abcdef` | `0123456789abcdef` | ok |
+| `f32` (parametro f32) | `0000000040490fdb` | `0000000040490fdb` | `0000000040490fdb` | ok |
+
+**0 desviaciones.** El `br` con un valor distinto —el caso que el test upstream no puede
+distinguir— **funciona correctamente**: `Operator::Br` tambien llama a `emit_return_values()`
+(`codegen.rs:3640`), con lo que copia y canonicaliza correctamente.
+
+#### 2.9.4 La superficie alcanzable en produccion es muy estrecha
+
+El validador estatico de CosmWasm **rechaza los tipos de funcion con mas de un resultado**
+(error medido: *"Wasm contract contains function with more than 1 results"*), y por tanto
+tambien rechaza los bloques multi-resultado. Como un `if` sin `else` exige que los parametros
+del bloque coincidan con sus resultados, y un `if` con cero parametros y un resultado es Wasm
+invalido, la **única forma de `if` con `else` implicito que puede llegar a produccion** es:
+
+```wat
+if (param T) (result T)      ;; T ∈ { i32, i64, f32, f64 }
+```
+
+Esto acota mucho la superficie: no hay bloques con parametros de tipos distintos, ni con mas de
+un parametro, ni bloques con `f32`/`f64` mixtos. La matriz de §2.9.3 cubre las variantes
+relevantes de esa superficie, y la de §2.9.2 el caso de coma flotante.
+
+**Lo que queda abierto:** `i32` con `enable_nan_canonicalization` no aplica (solo afecta a
+floats); los bloques `(param i32)(result i32)` se comportan como los de `i64` (mismo tipo de
+slot de 8 bytes). No se ha encontrado ninguna desviacion de valor en la superficie alcanzable.
 
 ### 2.10 Impacto
 
@@ -521,8 +674,13 @@ proceso**.
 
 **Sobre el atacante:** obtiene una denegacion de servicio contra el nodo por 4 652 gas de SDK.
 **No** obtiene robo de fondos, **no** obtiene ejecucion de codigo y **no** obtiene corrupcion
-del estado de la cadena. La hipotesis de *exfiltracion* o *manipulacion del flujo de control*
-sigue sin demostrarse (§2.9.1).
+del estado de la cadena.
+
+**Sobre la semantica (hallazgo 1c):** el atacante no controla el payload del NaN (lo produce el
+hardware), pero **si** controla que el contrato use la forma implicita, y por tanto que el
+resultado flotante dependa de la CPU. El efecto medido es una **ramificacion divergente** con
+estado distinto del contrato (§2.9.2): es un vector de **divergencia de app hash**, no de robo.
+La hipotesis de *exfiltracion* de datos mediante esta via sigue sin demostrarse.
 
 ### 2.11 Recomendacion
 
@@ -533,6 +691,11 @@ sigue sin demostrarse (§2.9.1).
    ambas nacen de la misma omision de `emit_if_block_end()`.
 2. **Auditar contratos legitimos** desplegados en fetchhub que usen `if` con parametro de bloque
    y `else` implicito en bucles largos: son las victimas reales del defecto.
+2b. **Auditar contratos con coma flotante** antes de aplicar el backport: los que producen un
+   NaN (`sqrt`, `floor`, `ceil`, `trunc`, `nearest`, `add/sub/mul/div` con operandos invalidos) y
+   lo pasan como parametro de bloque a un `if` con `else` implicito **cambian de resultado** al
+   aplicar el fix (§2.9.2). Si alguno ramifica sobre los bits del float, el **app hash cambia**
+   en el momento de la actualizacion del nodo.
 3. **Mitigacion de defensa en profundidad** (independiente del compilador): hacer que el manejador
    de trampas de Wasmer trate como irrecuperable **cualquier** `SIGSEGV` cuyo `SP` este fuera
    de la pila Wasm **y** restaurar la pila nativa antes de volver a ejecutar la instruccion — o,
@@ -628,6 +791,13 @@ python3 escalate.py --from 131536 --to 131541 --prefix 4 --fault-probe
 
 # matriz de evidencia: umbral fatal + coste en gas por tamano de pila
 python3 escalation_matrix.py --prefix 4 --stacks 512K,1M,2M
+
+# --- canonicalizacion de NaN (§2.9.2) ---
+# bits del f64 y RAMIFICACION divergente entre `else` implicito y explicito
+python3 nan_canon_probe.py
+
+# --- matriz de formas: semantica de valores (§2.9.3) ---
+python3 shape_matrix.py
 ```
 
 Artefactos clones en `.audit/` (excluido de Git por `.git/info/exclude`):
@@ -670,8 +840,14 @@ Fuentes de referencia obtenidas para esta auditoría:
   proporcionalmente; el `.so` de producción **no exporta** ningun setter de ese tamaño, asi que
   se usa el valor por defecto.
 * La busqueda de una via de *manipulacion del flujo de control* o *exfiltracion* (distinta de la
-  escalada a muerte de proceso) **sigue abierta**: §2.9.1 delimita la cobertura real de la
-  evidencia de integridad.
+  escalada a muerte de proceso) **sigue abierta**: §2.9.2 demuestra una **ramificacion divergente**
+  por la perdida de la canonicalizacion de NaN, pero **no** una exfiltracion de datos ni una
+  corrupcion del estado de la cadena; el vector medido es de divergencia de app hash.
+* La cobertura de la sonda de integridad sigue limitada a la forma `(param i64) (result i64)` con
+  presion de registros. **No** cubre: bloques con parametros de tipos mixtos, `br` hacia fuera de
+  un `if` con `else` implicito, `select`, `memory.copy` con direcciones solapadas, ni la
+  interaccion con otros bloques anidados. La forma de coma flotante se ha cubierto aparte
+  (§2.9.2) y **si** muestra una diferencia.
 * No se ha auditado el resto de la superficie de `fetchd` (módulos custom, IBC2,
   ICA, tokenfactory) en esta iteración.
 * El advisory `GHSA-v2h8-j899-r676` sigue sin corroboración pública (404 en la API de

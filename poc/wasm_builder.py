@@ -74,6 +74,7 @@ def name(s: str) -> bytes:
 # --------------------------------------------------------------------------
 
 I32, I64 = 0x7F, 0x7E
+F32, F64 = 0x7D, 0x7C
 
 
 def op_unreachable():
@@ -148,6 +149,56 @@ def op_i64_const(v):
     return b"\x42" + sleb(v)
 
 
+def op_f64_const(v):
+    """f64.const with the raw 64-bit pattern (use struct.pack for floats)."""
+    return b"\x44" + struct.pack("<d", v)
+
+
+def op_f64_const_bits(bits):
+    """f64.const from the raw 64-bit pattern (useful for NaN payloads)."""
+    return b"\x44" + struct.pack("<Q", bits)
+
+
+def op_f64_sqrt():
+    return b"\x9f"
+
+
+def op_f64_neg():
+    return b"\x9a"
+
+
+def op_f64_abs():
+    return b"\x99"
+
+
+def op_f64_add():
+    return b"\xa0"
+
+
+def op_f64_div():
+    return b"\xa7"
+
+
+def op_i64_reinterpret_f64():
+    return b"\xbd"
+
+
+def op_f64_reinterpret_i64():
+    return b"\xbf"
+
+
+def op_f32_sqrt():
+    return b"\x91"
+
+
+def op_f32_const_bits(bits):
+    return b"\x43" + struct.pack("<I", bits)
+
+
+def op_i32_reinterpret_f32():
+    return b"\xbc"
+
+
 def op_i32_eqz():
     return b"\x45"
 
@@ -164,6 +215,10 @@ def op_i64_ne():
     return b"\x52"
 
 
+def op_i64_eq():
+    return b"\x51"
+
+
 def op_i32_rem_u():
     return b"\x70"
 
@@ -178,6 +233,14 @@ def op_i32_add():
 
 def op_i32_store(offset=0, align=2):
     return b"\x36" + bytes([align]) + uleb(offset)
+
+
+def op_i64_store(offset=0, align=3):
+    return b"\x37" + bytes([align]) + uleb(offset)
+
+
+def op_f64_store(offset=0, align=3):
+    return b"\x39" + bytes([align]) + uleb(offset)
 
 
 def op_i32_sub():

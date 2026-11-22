@@ -42,6 +42,8 @@ El `.so` de producción se espera en
 | `context_probe.py` | Compara ejecución en hilo principal vs hilo Python y vuelca `/proc/self/maps` |
 | `measure_drift.py` | Muestreo del stack nativo vía callback de host |
 | `fault_probe.py`, `fault_probe2.py` | Captura de la señal cruda: `si_code`, `si_addr`, `RSP`, `RIP` y el mapeo que contiene el `RIP`. **Nota:** `fault_probe.py` instala el manejador *sin* `SA_ONSTACK` (el README anterior afirmaba lo contrario), por lo que **no puede observar un fallo que ocurre sobre la pila agotada**: el kernel intenta empujar el marco de la señal sobre esa pila, el empuje falla también y el proceso muere antes. Para eso está `signal_probe.py`. |
+| **`nan_canon_probe.py`** | **Canonicalización de NaN (§2.9.2)**: el `else` implícito se salta la canonicalización en la rama falsa → el `f64` NaN conserva el payload del hardware y el contrato **ramifica de forma distinta** que con `else` explícito |
+| **`shape_matrix.py`** | Matriz de **formas** de bloque (`passthrough`, `replace`, `branch` con valor distinto, `unreachable`, `nested`, `f32`): el `else` implícito coincide con el explícito y con la spec en **0 desviaciones** |
 | `drift_fault.py` | Diagnóstico del aterrizaje del SP desviado y mapa de memoria completo |
 | `jit_analyze.py` | Extrae el código JIT del caché y calcula el balance de RSP de los bucles |
 | `crash_test.py` | Matriz producción-like de muerte de proceso (600–4096 `if`/iteración) |
@@ -87,3 +89,14 @@ con 200 000 iteraciones.
 el `SP` está fuera de la pila Wasm; el manejador de señales restaura entonces `SIG_DFL` y
 vuelve, de modo que la instrucción que falló se re-ejecuta y el proceso muere. Ése es
 precisamente el mecanismo que convierte la fuga de Singlepass en una muerte de proceso.
+
+**La canonicalización de NaN también se pierde (§2.9.2).** Singlepass la activa por defecto
+(`enable_nan_canonicalization: true`), pero la difiere: `f64.sqrt/floor/ceil/trunc/nearest` y las
+aritméticas marcan el resultado y lo canonicalizan **al salir de la función**
+(`emit_return_values`). La rama falsa del `else` implícito **no pasa por ahí**, así que el NaN
+conserva el *payload del hardware* (x86-64: `0xFFF8000000000000`; AArch64:
+`0x7FF8000000000000`) en lugar del canónico `0x7FF8000000000000`. El mismo programa fuente da
+distinto resultado según el compilador emitiera `if`/`else` o sólo `if`, y un contrato que ramifica
+sobre los bits del float **ramifica de forma distinta** → estado distinto → app hash distinto.
+Además, **aplicar el fix upstream cambia ese resultado**, de modo que el backport no es
+semánticamente neutro para esos contratos.
