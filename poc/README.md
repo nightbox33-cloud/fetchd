@@ -119,6 +119,16 @@ es lo que acota la superficie a `if (param T)(result T)`—. Y `CodeUploadAccess
 (wasmd `DefaultParams`) significa que **cualquier cuenta** puede subir el contrato y llegar al
 disparador.
 
+**El split de consenso (§2.9.7).** La heterogeneidad de arquitectura es real: el fork privado
+distribuye `libwasmvm.aarch64.so` y el `Makefile` de fetchd v0.15.1 verifica el SHA256 del
+wasmvm **por arquitectura** (ARM es plataforma soportada). El defecto es por tanto un
+**generador permissionless de splits**: cualquiera puede partir la cadena. El *doble gasto
+directo* por split **no es realizable en CometBFT** — una rama que no alcanza 2/3 del voting
+power **no ejecuta ninguna transacción** (`FinalizeBlock` es lo único que avanza el estado), así
+que el depósito en la rama perdedora nunca ocurre. Lo grave es el **atasco permanente del grupo
+minoritario** (no pueden resincronizar: su app hash difiere), el **halt** si ese stake supera 1/3,
+y el **congelamiento** durante el halt.
+
 **La canonicalización de NaN también se pierde (§2.9.2).** Singlepass la activa por defecto
 (`enable_nan_canonicalization: true`), pero la difiere: `f64.sqrt/floor/ceil/trunc/nearest` y las
 aritméticas marcan el resultado y lo canonicalizan **al salir de la función**

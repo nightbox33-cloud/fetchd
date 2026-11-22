@@ -12,7 +12,7 @@
 |---|----------|--------|----------------------|
 | 1a | Miscompilación de Singlepass (`if` con parámetro de bloque y `else` implícito) presente en producción | **Confirmado, sin parchear** | **Media** — disparador permissionless y barato (**7 754 gas de SDK**); rompe contratos legítimos |
 | 1b | **Escalada de la misma fuga a muerte del proceso** (`SIGSEGV` irrecuperable), que ocurre en `FinalizeBlock` | **Confirmado, sin parchear** | **Crítica** — disparador permissionless de **4 652 gas de SDK** (430× de holgura) que **detiene la cadena completa**: todos los nodos ejecutan el bloque y mueren (§2.8.6) |
-| 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU, **ramificación divergente** y **precio cobrado ≠ precio cotizado** (§2.9.6) | **Confirmado, sin parchear** | **Media/Alta** — divergencia de app hash entre arquitecturas, riesgo financiero en contratos de terceros con `f64` y riesgo al aplicar el parche |
+| 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU, **ramificación divergente**, **precio cobrado ≠ precio cotizado** (§2.9.6) y **split de consensus** (§2.9.7) | **Confirmado, sin parchear** | **Media/Alta** — divergencia de app hash entre arquitecturas, **generador permissionless de splits/halt**, riesgo financiero en contratos de terceros con `f64` y riesgo al aplicar el parche |
 | 2 | Respuesta vacía del VM (`res.Ok == nil`) en wasmd | **Resuelto** — ya está en upstream v0.61.15 | Ninguna (guardas presentes) |
 | 3 | Clasificación errónea de fallos por el harness C ABI | **Corregido** en el PoC | Afectaba a reproducciones previas |
 | 4 | Confusión de unidades de gas (puntos de CosmWasm ≠ gas del SDK) en un análisis previo | **Corregido** — ver §2.5 | Invertía la conclusión de alcance |
@@ -973,10 +973,8 @@ atacante se lleva.
    real es **poco probable** queaffeine de este patron. Es *posible*, no *probable*.
 4. **La via que el bug si crea y el atacante no puede evitar es la heterogeneidad de
    arquitectura** (§2.9.2, consecuencia 1): un contrato que ramifique sobre los bits del NaN
-   produce **un estado en x86-64 y otro en AArch64**. Ahi la consecuencia primaria es un **split de
-   consensus**, no un robo: los dos grupos de validadores votan estados distintos y la cadena se
-   detiene. Convertir un split en un robo exigiria ademas ganar el fork choice, lo que exige
-   una fraccion del stake que este defecto **no** proporciona.
+   produce **un estado en x86-64 y otro en AArch64**. La consecuencia primaria es un **split de
+   consensus** y hay que analizarlo con cuidado: §2.9.7 lo hace.
 
 **Veredicto.** El defecto **no es un robo permissionless por si mismo**, y presentarlo como tal
 seria exagerar. Lo que es:
@@ -993,6 +991,94 @@ La recomendacion de §2.12 no cambia: **backport del fix upstream**, y **auditor
 contratos con coma flotante antes de aplicarlo** — esa auditoria es ahora mas urgente, porque
 el patron vulnerable no es solo "el NaN como valor de retorno", sino "cualquier decision sobre
 los bits de un NaN, hecha con `select`".
+
+#### 2.9.7 El split de consenso a nivel de cadena (correccion de un analisis demasiado rapido)
+
+Una version anterior de este informe despachaba el vector de robo a nivel de cadena en una
+frase: *"Convertir un split en un robo exigiria ademas ganar el fork choice, lo que exige una
+fraccion del stake que este defecto **no** proporciona"*. **Esa frase era demasiado fuerte y
+esta incompleta.** Lo que sigue la corrige en las dos direcciones.
+
+**Lo que se concede (y obliga a corregir el informe).**
+
+* El **fork choice no es una barrera criptografica**, es una convencion social. El set de
+  validadores es publico — se conocen sus IPs, su binario y su arquitectura — y la rama que
+  gana es, en la practica, **predecible**: la que supera 2/3 del voting power.
+* La **heterogeneidad de arquitectura es real, no teorica**. El fork privado de fetchai
+  distribuye los dos binarios:
+
+  ```
+  priv_wasmvm_sec/internal/api/libwasmvm.x86_64.so
+  priv_wasmvm_sec/internal/api/libwasmvm.aarch64.so
+  priv_wasmvm_sec/internal/api/libwasmvm_muslc.aarch64.a.xz
+  ```
+
+  y el `Makefile` de fetchd v0.15.1 **verifica el SHA256 del wasmvm estatico por
+  arquitectura**, con lo que ARM es una plataforma oficialmente soportada:
+
+  ```make
+  WASMVM_SHA256_x86_64  := ab1a878ed3beecc5f3821b1fb1f73a5254443e3ba9bca53964a50a122ee77497
+  WASMVM_SHA256_aarch64 := cc9175235d1e0051002c33a94027a63a008b14dcc13ae483685e511d59754235
+  ```
+
+  (`musl.Dockerfile`: `docker buildx build --platform linux/amd64,linux/arm64`.)
+* Por tanto el defecto es un **generador permissionless de splits de consensus**: cualquiera
+  puede desplegar el contrato divergente y partir la cadena. Eso, por si solo, es un hallazgo
+  de primera clase, y el informe lo medía mal.
+
+**El hueco del argumento de "doble gasto sobre fork" — verificado en el codigo.**
+
+El doble gasto sobre fork, tal como se suele formular (depositar en las dos ramas, cobrar en
+la ganadora), **no es realizable en CometBFT**, por una razon concreta y comprobable:
+
+> **Una rama que no alcanza 2/3 del voting power no ejecuta ninguna transaccion.**
+
+* El estado solo avanza en `FinalizeBlock`, que es lo unico que llama a `deliverTx`
+  (`baseapp/abci.go:803` -> `internalFinalizeBlock`), y `deliverTx` es lo unico que ejecuta los
+  mensajes (`baseapp.go:1040`: `if mode != execModeFinalize && mode != execModeSimulate { break }`).
+* Un bloque exige **>2/3** de precommits para committearse
+  (`baseapp/abci_utils.go:143`: `requiredVP := ((totalVP * 2) / 3) + 1`).
+* `CheckTx`, `PrepareProposal` y `ProcessProposal` **no** ejecutan mensajes (usan
+  `execModeCheck` / `execModeProcessProposal`).
+
+Consecuencias, en el orden del ataque propuesto:
+
+| paso del ataque | que ocurre realmente |
+|---|---|
+| el atacante deposita en la rama perdedora | la rama perdedora **no ejecuta** la transaccion: el exchange no acredita nada, no hay saldo, no hay retiro |
+| el exchange "acredita" en la rama perdedora | imposible: sin `FinalizeBlock` no hay estado que ejecutar |
+| el atacante retira en la rama ganadora | solo puede retirar lo que la rama ganadora **ejecuto** — y en la ganadora no esta su deposito |
+
+Es decir: el "deposito en la rama abandonada" **nunca ocurrio**, luego no hay nada que doblar.
+Ademas, ambas ramas compiten **por la misma altura**, de modo que **solo una tiene estado
+ejecutado**: no existen dos historiales vivos que un exchange pueda usar a la vez. Esta es una
+diferencia estructural con el patron de 2017 en Bitcoin, donde las dos ramas son validas y
+minadas y un exchange minaba en las dos; en CometBFT PoS las dos compiten por la misma altura y
+solo una finalize.
+
+**Lo que si es grave (y es mas que un doble gasto).**
+
+1. **Atasco permanente del grupo minoritario.** Un nodo ARM que recalcula el bloque divergente
+   obtiene un app hash distinto: **no puede sincronizar nunca** y entra en crash-loop de
+   resync. Su stake queda inoperante.
+2. **Halt si el stake atascado supera 1/3.** La rama mayoritaria deja de alcanzar 2/3 del stake
+   *total* y la cadena se detiene. Y el atacante puede **repetir** el ataque — desplegar otro
+   contrato divergente — para **mantener** el halt de forma permissionless.
+3. **Ventana de robo por congelamiento.** Durante el halt hay dos historiales candidatos, los
+   precios *off-chain* siguen moviendose y las operaciones de los usuarios (liquidaciones, swaps
+   abiertos, prestamos) quedan congeladas. Ese es el hueco donde un atacante puede operar con
+   informacion desactualizada; y si el atacante tiene >1/3 puede **vetar** el gov proposal de
+   resolucion hasta que se adopte la rama en la que sus operaciones si se aplicaron.
+4. **La unica variante del "doble gasto" que se sostiene** es, por tanto, la del **veto**: con
+   >1/3 el atacante bloquea la resolucion y la comunidad adopta su rama. Y ahi el defecto aporta
+   el **trigger** (el halt permissionless), no el poder de veto — que hay que comprarlo.
+
+**Veredicto corregido.** El defecto es un **generador permissionless de splits de consensus** y,
+por tanto, de halts y de atasco de validadores. El **doble gasto directo por split no es
+realizable en CometBFT** por la razon verificada arriba. El riesgo financiero real es el
+**congelamiento durante el halt** y la **resolucion social** de un halt con dos historiales
+validos. Y la accion operativa inmediata sigue siendo la misma: **filtrar los contratos
+nuevos por gobernanza** (`CodeUploadAccess`), que corta la cadena en su primer eslabon.
 
 ### 2.10 La configuracion efectiva en fetchd, verificada extremo a extremo
 
