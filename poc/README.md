@@ -43,6 +43,7 @@ El `.so` de producción se espera en
 | `measure_drift.py` | Muestreo del stack nativo vía callback de host |
 | `fault_probe.py`, `fault_probe2.py` | Captura de la señal cruda: `si_code`, `si_addr`, `RSP`, `RIP` y el mapeo que contiene el `RIP`. **Nota:** `fault_probe.py` instala el manejador *sin* `SA_ONSTACK` (el README anterior afirmaba lo contrario), por lo que **no puede observar un fallo que ocurre sobre la pila agotada**: el kernel intenta empujar el marco de la señal sobre esa pila, el empuje falla también y el proceso muere antes. Para eso está `signal_probe.py`. |
 | **`nan_canon_probe.py`** | **Canonicalización de NaN (§2.9.2)**: el `else` implícito se salta la canonicalización en la rama falsa → el `f64` NaN conserva el payload del hardware y el contrato **ramifica de forma distinta** que con `else` explícito |
+| **`blocktype_probe.py`** | **¿Hay escapatoria del límite `max_function_results`?** Un `if` multi-resultado por type index → `REJECTED`; por tipo func *inline* → `REJECTED` (el parser no lo admite); control `(param i32)(result i32)` → `OK`. La superficie alcanzable es exactamente `if (param T)(result T)` |
 | **`shape_matrix.py`** | Matriz de **formas** de bloque (`passthrough`, `replace`, `branch` con valor distinto, `unreachable`, `nested`, `f32`): el `else` implícito coincide con el explícito y con la spec en **0 desviaciones** |
 | `drift_fault.py` | Diagnóstico del aterrizaje del SP desviado y mapa de memoria completo |
 | `jit_analyze.py` | Extrae el código JIT del caché y calcula el balance de RSP de los bucles |
@@ -69,6 +70,13 @@ de valores; los valores empujados antes del `if` quedan *debajo*. Una sonda que 
 después de hacer `drop` de los valores del prefijo está midiendo el valor equivocado y es
 **incapaz de detectar una diferencia** entre `else` implícito y explícito. `integrity_probe.py`
 captura el resultado antes de los `drop`; `semantic_probe.py` tenía ese defecto y fue corregido.
+
+**El alcance es un halt de cadena, no un nodo (§2.8.6).** La ejecución del contrato ocurre en
+`FinalizeBlock`, que **ejecutan todos los nodos**, y la transacción maliciosa **pasa el
+`CheckTx`** sin llegar a ejecutar el contrato (en el SDK los mensajes solo se ejecutan en
+`execModeFinalize`/`execModeSimulate`). Un proposer honesto la incluye sin saber nada, y todos
+los validadores mueren al mismo altura. El `middleware` de recuperación del SDK solo captura
+*panics* de Go, no señales: no ayuda.
 
 **Escalada a muerte del proceso (§2.8).** La fuga del `else` implícito no se limita a la trampa
 `call stack exhausted`. Si el bucle que filtra pila **no contiene ninguna llamada**, el `RSP`

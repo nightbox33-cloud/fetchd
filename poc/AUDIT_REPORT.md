@@ -11,7 +11,7 @@
 | # | Hallazgo | Estado | Severidad en fetchd |
 |---|----------|--------|----------------------|
 | 1a | Miscompilación de Singlepass (`if` con parámetro de bloque y `else` implícito) presente en producción | **Confirmado, sin parchear** | **Media** — disparador permissionless y barato (**7 754 gas de SDK**); rompe contratos legítimos |
-| 1b | **Escalada de la misma fuga a muerte del proceso del validador** (`SIGSEGV` irrecuperable) | **Confirmado, sin parchear** | **Alta** — disparador permissionless de **4 652 gas de SDK** (430× de holgura) que **mata el proceso** del nodo |
+| 1b | **Escalada de la misma fuga a muerte del proceso** (`SIGSEGV` irrecuperable), que ocurre en `FinalizeBlock` | **Confirmado, sin parchear** | **Crítica** — disparador permissionless de **4 652 gas de SDK** (430× de holgura) que **detiene la cadena completa**: todos los nodos ejecutan el bloque y mueren (§2.8.6) |
 | 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU y **ramificación divergente** | **Confirmado, sin parchear** | **Media/Alta** — riesgo de **divergencia de app hash** entre arquitecturas y al aplicar el parche |
 | 2 | Respuesta vacía del VM (`res.Ok == nil`) en wasmd | **Resuelto** — ya está en upstream v0.61.15 | Ninguna (guardas presentes) |
 | 3 | Clasificación errónea de fallos por el harness C ABI | **Corregido** en el PoC | Afectaba a reproducciones previas |
@@ -37,8 +37,9 @@ acota la superficie a `if (param T)(result T)`, y `CodeUploadAccess = AllowEvery
   implícito.
 - **Como muerte del proceso** (~4 652 gas de SDK, 430× de holgura — ver **§2.8**): la misma fuga
   puede escalarse hasta que el `SIGSEGV` sea **irrecuperable**, y el **proceso del validador
-  muere con `SIGSEGV`**. Es una denegación de servicio contra el nodo, no una transacción
-  fallida.
+  muere con `SIGSEGV`**. La ejecución ocurre en `FinalizeBlock`, que **ejecutan todos los
+  nodos**, y la transacción maliciosa **pasa el `CheckTx`** sin llegar a ejecutar el contrato
+  (§2.8.6): por tanto el alcance no es un nodo, sino un **halt de cadena** permissionless.
 - **Como no determinismo de coma flotante** (ver **§2.9.2**): la rama falsa del `else` implícito
   **se salta la canonicalización de NaN**, de modo que un `f64` NaN conserva el *payload del
   hardware* (0xFFF8… en x86-64, 0x7FF8… en AArch64) en lugar del patrón canónico. Consecuencia
@@ -526,6 +527,90 @@ justa: es lo que hace que el `if` reserve un *slot* de pila que la ruta falsa no
 > proceso**. La investigacion de una via de exfiltracion o de manipulacion del flujo de control
 > sigue **abierta** y se documenta por separado en §2.9 y §5.
 
+#### 2.8.6 El alcance real no es un nodo: es un **halt de cadena**
+
+El §2.8.5 dice "el proceso del validador muere". Al revisar **donde** se ejecuta el contrato,
+la conclusion correcta es mas grave: la muerte ocurre en `FinalizeBlock`, que **ejecutan todos
+los nodos de la red**.
+
+**El `CheckTx` no ejecuta el contrato.** En el SDK, los mensajes solo se ejecutan en
+`FinalizeBlock` y en la simulacion:
+
+```go
+// cosmos-sdk/baseapp/baseapp.go:1034
+func (app *BaseApp) runMsgs(ctx sdk.Context, msgs []sdk.Msg, msgsV2 []protov2.Message, mode execMode) (*sdk.Result, error) {
+        for i, msg := range msgs {
+                if mode != execModeFinalize && mode != execModeSimulate {
+                        break                       // <-- en CheckTx NO se ejecuta
+                }
+                ...
+```
+
+Es decir: la transaccion maliciosa **pasa el filtro de la mempool** (el `CheckTx` solo corre el
+*ante handler*: firma, secuencia, fees) sin llegar a tocar el wasmvm. Por eso un proposer
+**honesto** la incluye en su bloque sin saber nada.
+
+**La ejecucion ocurre en `FinalizeBlock`, en todos los nodos.** fetchd usa CometBFT
+**v0.38.21** (`go.mod`), es decir ABCI v2, cuyo camino de ejecucion es precisamente
+`FinalizeBlock` -> `deliverTx` por cada transaccion del bloque:
+
+```go
+// cosmos-sdk/baseapp/abci.go:803  (internalFinalizeBlock)
+for _, rawTx := range req.Txs {
+        if _, err := app.txDecoder(rawTx); err == nil {
+                response = app.deliverTx(rawTx)     // <-- execModeFinalize
+        }
+```
+
+Y `deliverTx` -> `runTx(execModeFinalize)` -> `runMsgs(execModeFinalize)` -> el router de
+mensajes -> el keeper de `wasm`:
+
+```go
+// wasmd/x/wasm/keeper/msg_server.go:70   InstantiateContract
+contractAddr, data, err := m.keeper.instantiate(ctx, msg.CodeID, senderAddr, ...)
+// wasmd/x/wasm/keeper/keeper.go:353
+res, gasUsed, err := k.wasmVM.Instantiate(codeInfo.CodeHash, env, info, initMsg, ...)  // cgo -> wasmvm
+```
+
+Ahí se ejecuta el *entry point* `instantiate` del contrato, que es donde vive el bucle con el
+`else` implicito. **Cada nodo que procesa ese bloque ejecuta el contrato y muere.**
+
+**El middleware de recuperacion del SDK no ayuda.** Solo captura *panics* de Go
+(`recover()`), no senales; un `SIGSEGV` no es un panic y no es recuperable.
+
+La cadena de ataque completa, a nivel de red:
+
+```
+cualquier cuenta
+  -> tx1: StoreCode          (CodeUploadAccess = AllowEverybody)   -> pasa CheckTx
+  -> tx2: InstantiateContract                                     -> pasa CheckTx
+  -> un proposer honesto incluye tx2 en el bloque
+  -> TODOS los nodos ejecutan FinalizeBlock -> el contrato se ejecuta
+  -> 131 539 iteraciones -> guard page -> SIGSEGV
+  -> TODOS los nodos mueren al mismo altura
+  -> la cadena no puede avanzar: cada nodo que reinicia vuelve a procesar
+     el mismo bloque y vuelve a morir (crash loop)
+```
+
+**Consecuencia para la severidad:** el hallazgo 1b no es "denegacion de servicio contra un
+nodo" sino **detencion de la cadena completa, permissionless y a coste de ~4 652 gas de SDK**.
+Es la severidad mas alta posible para un DoS permissionless en una cadena PoS, y es
+**superior** a la del gas-halt-limit o a cualquier otro vector conocido en fetchd: no depende de
+que la cadena tenga un minimo de stake bloqueado, no requiere_validator malicioso, y no se puede
+parar con limites de gas.
+
+**Matices honestos.**
+- Requiere que la tx llegue a un bloque. La tx es valida y pagada, asi que un proposer honesto
+  la incluye; un proposer podria filtrarla, pero no hay ninguna regla que le obligue.
+- El proposer **tambien** muere al ejecutar su propio bloque, asi que el ataque no distingue
+  validadores: es la mismatransaction la que mata a todos.
+- El estado de la cadena no se corrompe: la transaccion no llega a aplicarse, y el nodo muere
+  *durante* `FinalizeBlock`, antes del `Commit`. El app hash no cambia; la cadena simplemente
+  no avanza.
+- No se ha reproducido a nivel de cadena (no hay un `fetchd` completo compilado en este
+  entorno, §6): la conclusion se apoya en el codigo del SDK y de wasmd, y en el hecho medido
+  de que el `SIGSEGV` mata el proceso que carga la libreria.
+
 ### 2.9 Integridad: el alcance exacto de la afirmacion
 
 *(§2.6 demuestra, con oraculo diferencial, que los valores calculados por la forma cubierta son
@@ -672,6 +757,33 @@ que quisiera ampliar la superficie tendria que cambiar `wasmtypes.VMConfig{}` en
 `app/app.go:709` y recompilar. En el estado actual del repositorio no hay ninguna via
 *on-chain* para relajarlo.
 
+**Comprobacion empirica de que no hay escapatoria** (`blocktype_probe.py`, sobre el `.so` de
+produccion). El limite `max_function_results` se calcula **solo sobre la seccion Type**:
+
+```rust
+// cosmwasm-vm/packages/vm/src/parsed_wasm.rs:143
+CompositeInnerType::Func(ft) => {
+    this.max_func_params   = cmp::max(ft.params().len(),   this.max_func_params);
+    this.max_func_results  = cmp::max(ft.results().len(), this.max_func_results);
+}
+```
+
+Un bloque con un tipo **fuera** de la seccion Type esquivaria el limite, y el formato binario
+ofrece una sola possibility: un *block type* codificado **inline** (`0x60` seguido de los
+vectores de parametros y resultados) en lugar de un indice de tipo. La sonda mide las tres
+vias:
+
+| via | resultado | por que |
+|---|---|---|
+| `if` con indice de tipo (2 params / 2 resultados) | **REJECTED** | *"Wasm contract contains function with more than 1 results"* |
+| `if` con tipo func **inline** (2 params / 2 resultados) | **REJECTED** | *"invalid value type"* — el parser no admite un tipo func inline |
+| `if (param i32)(result i32)` (control) | **OK** | la forma alcanzable |
+
+El parser de `wasmparser` confirma el motivo: `read_block_type` solo reconoce `0x40` (vacio),
+un `valtype`, o un indice `s33` positivo; **no existe el tipo func inline** en el formato
+binario. Por tanto un bloque multi-resultado *necesita* un type index, ese type index vive en
+la seccion Type, y la seccion Type es exactamente lo que el limite cuenta.
+
 **Lo que queda abierto:** `i32` con `enable_nan_canonicalization` no aplica (solo afecta a
 floats); los bloques `(param i32)(result i32)` se comportan como los de `i64` (mismo tipo de
 slot de 8 bytes). No se ha encontrado ninguna desviacion de valor en la superficie alcanzable.
@@ -788,21 +900,28 @@ cualquier cuenta
   -> muerte del proceso del nodo
 ```
 
+Y como la ejecucion ocurre en `FinalizeBlock` —que ejecutan **todos** los nodos—, mientras que
+la transaccion **pasa el `CheckTx`** sin ejecutar el contrato (§2.8.6), el alcance real de esta
+cadena es un **halt de cadena**, no la muerte de un nodo aislado.
+
 ### 2.11 Impacto
 
 **Sobre la cadena:** la transaccion atacante **no** se aplica (el estado se revierte), pero el
-**proceso del nodo muere** (§2.8). Es una parada del nodo reproducible y permissionless, al
+**proceso del nodo muere** (§2.8). Y como la ejecucion ocurre en `FinalizeBlock` —que ejecutan
+todos los nodos— y la transaccion pasa el `CheckTx` sin ejecutar el contrato (§2.8.6), el
+alcance real es un **halt de la cadena completa**: todos los validadores mueren al mismo altura
+y el estado no se corrompe, pero la red no puede avanzar. Es reproducible y permissionless, al
 precio de 4 652 gas de SDK.
 
 **Sobre otros contratos:** el defecto no discrimina por quien llama: cualquier contrato
 legitimo que ejecute mas de ~131 000 `if` con `else` implicito, parametro de bloque y presion de
 registros **falla**, aunque su logica sea correcta. Es un fallo de disponibilidad *de terceros*,
 deterministico y reproducible. Con la forma de §2.8, ese mismo contrato ajeno puede **matar el
-proceso**.
+proceso** —y, si su transaccion llega a un bloque, **matar a todos los nodos**.
 
-**Sobre el atacante:** obtiene una denegacion de servicio contra el nodo por 4 652 gas de SDK.
-**No** obtiene robo de fondos, **no** obtiene ejecucion de codigo y **no** obtiene corrupcion
-del estado de la cadena.
+**Sobre el atacante:** obtiene una detencion de la cadena por 4 652 gas de SDK. **No** obtiene
+robo de fondos, **no** obtiene ejecucion de codigo y **no** obtiene corrupcion del estado de la
+cadena.
 
 **Sobre la semantica (hallazgo 1c):** el atacante no controla el payload del NaN (lo produce el
 hardware), pero **si** controla que el contrato use la forma implicita, y por tanto que el
@@ -833,6 +952,16 @@ La hipotesis de *exfiltracion* de datos mediante esta via sigue sin demostrarse.
 4. **Limite de gas por contrato** como contencion: el disparador cuesta 4 652 gas de SDK, muy
    por debajo de cualquier limite razonable por transaccion, asi que el limite de gas **no**
    mitiga este caso (a diferencia de otros DoS).
+5. **Contencion de red mientras no haya parche**: como el alcance es un halt de cadena
+   (§2.8.6), la unica mitigacion *operativa* inmediata es **filtrar las transacciones que
+   instancian contratos nuevos** hasta que exista el backport. Los parametros del modulo `wasm`
+   son *on-chain* y gobiernables: `CodeUploadAccess` puede cambiarse a `Nobody` o a una lista
+   blanca mediante una propuesta de gobernanza, lo que corta la cadena de ataque en su primer
+   eslabon (el `StoreCode`) sin necesidad de tocar el binario. Es la medida mas barata y la
+   unica que no exige recompilar nada. Recordar que `max_function_results` y el resto de
+   `WasmLimits` **no** son una via de mitigacion: estan en la configuracion del nodo, no on-chain,
+   y ademas no acotan este defecto (la forma alcanzable `if (param T)(result T)` ya esta
+   dentro de los limites por defecto).
 
 ## 3. Hallazgo 2 — `res.Ok == nil` en wasmd: ya resuelto
 
@@ -926,6 +1055,9 @@ python3 nan_canon_probe.py
 
 # --- matriz de formas: semantica de valores (§2.9.3) ---
 python3 shape_matrix.py
+
+# --- ¿hay escapatoria del limite max_function_results? (§2.9.4) ---
+python3 blocktype_probe.py
 ```
 
 Artefactos clones en `.audit/` (excluido de Git por `.git/info/exclude`):
@@ -949,6 +1081,12 @@ Fuentes de referencia obtenidas para esta auditoría:
   cadena; todas las conclusiones de alcance se derivan del código del SDK
   (`abci_utils.go`, `consensus_params`) y de los genesis de fetchhub, más la medición
   directa del gas en el `.so` de producción.
+* La conclusión de **halt de cadena** (§2.8.6) se apoya en el código del SDK
+  (`baseapp.go:1040` —los mensajes no se ejecutan en `CheckTx`— y `abci.go:803` —`FinalizeBlock`
+  ejecuta `deliverTx` para cada tx—) y de wasmd (`msg_server.go:70` → `keeper.go:353` →
+  `wasmVM.Instantiate`). **No** se ha reproducido con un `fetchd` en marcha: falta el toolchain
+  Go/Rust en este entorno. Lo que sí está medido es el `SIGSEGV` que mata el proceso que carga
+  `libwasmvm`, que es el extremo final de esa cadena.
 * El `minimum-gas-prices` real de la red principal no es público en los artefactos
   consultados; no afecta a la conclusión (el techo relevante es `max_gas`, no el precio).
 * No se ha construido el compilador Singlepass parcheado, de modo que no se ha ejecutado el
@@ -971,11 +1109,15 @@ Fuentes de referencia obtenidas para esta auditoría:
   escalada a muerte de proceso) **sigue abierta**: §2.9.2 demuestra una **ramificacion divergente**
   por la perdida de la canonicalizacion de NaN, pero **no** una exfiltracion de datos ni una
   corrupcion del estado de la cadena; el vector medido es de divergencia de app hash.
-* La cobertura de la sonda de integridad sigue limitada a la forma `(param i64) (result i64)` con
-  presion de registros. **No** cubre: bloques con parametros de tipos mixtos, `br` hacia fuera de
-  un `if` con `else` implicito, `select`, `memory.copy` con direcciones solapadas, ni la
-  interaccion con otros bloques anidados. La forma de coma flotante se ha cubierto aparte
-  (§2.9.2) y **si** muestra una diferencia.
+* ~~La cobertura de la sonda de integridad sigue limitada a la forma `(param i64) (result i64)`~~
+  — **parcialmente resuelto**: `shape_matrix.py` (§2.9.3) cubre ahora `passthrough`, `replace`,
+  `branch` (con un valor **distinto**, el caso que el test upstream no puede distinguir),
+  `unreachable`, `nested` y `f32`, con **0 desviaciones**; y `blocktype_probe.py` (§2.9.4)
+  demuestra que la superficie alcanzable no se puede ampliar por la via del *block type*.
+  **Siguen sin cubrir:** `select`, `memory.copy` con direcciones solapadas, y bloques con
+  parametros de tipos **mixtos** (`i32`+`i64`), que son **inalcanzables** en produccion: un `if`
+  sin `else` exige `[t*] -> [t*]`, y con `max_function_results = 1` eso obliga a un unico
+  parametro y un unico resultado del mismo tipo.
 * No se ha auditado el resto de la superficie de `fetchd` (módulos custom, IBC2,
   ICA, tokenfactory) en esta iteración.
 * El advisory `GHSA-v2h8-j899-r676` sigue sin corroboración pública (404 en la API de
