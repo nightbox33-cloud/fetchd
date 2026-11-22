@@ -1034,8 +1034,9 @@ la ganadora), **no es realizable en CometBFT**, por una razon concreta y comprob
 > **Una rama que no alcanza 2/3 del voting power no ejecuta ninguna transaccion.**
 
 * El estado solo avanza en `FinalizeBlock`, que es lo unico que llama a `deliverTx`
-  (`baseapp/abci.go:803` -> `internalFinalizeBlock`), y `deliverTx` es lo unico que ejecuta los
-  mensajes (`baseapp.go:1040`: `if mode != execModeFinalize && mode != execModeSimulate { break }`).
+  (`baseapp/abci.go:705` `internalFinalizeBlock` -> `baseapp/abci.go:806` `app.deliverTx(rawTx)`),
+  y `deliverTx` es lo unico que ejecuta los mensajes (`baseapp/baseapp.go:1040`:
+  `if mode != execModeFinalize && mode != execModeSimulate { break }`).
 * Un bloque exige **>2/3** de precommits para committearse
   (`baseapp/abci_utils.go:143`: `requiredVP := ((totalVP * 2) / 3) + 1`).
 * `CheckTx`, `PrepareProposal` y `ProcessProposal` **no** ejecutan mensajes (usan
