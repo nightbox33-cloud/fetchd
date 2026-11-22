@@ -78,6 +78,12 @@ captura el resultado antes de los `drop`; `semantic_probe.py` tenía ese defecto
 los validadores mueren al mismo altura. El `middleware` de recuperación del SDK solo captura
 *panics* de Go, no señales: no ayuda.
 
+**Las *smart queries* son un segundo vector (§2.8.7).** `SmartContractState` ejecuta el
+contrato en el nodo que atiende la consulta, y su `recover()` solo captura *panics* de Go, no
+señales: un `SIGSEGV` mata el nodo. El límite de gas de la query (3 000 000) no protege, porque
+el crash cuesta 4 652. Permite matar nodos full-node/RPC de forma selectiva, sin que ninguna
+transacción maliciosa tenga que llegar a un bloque.
+
 **Escalada a muerte del proceso (§2.8).** La fuga del `else` implícito no se limita a la trampa
 `call stack exhausted`. Si el bucle que filtra pila **no contiene ninguna llamada**, el `RSP`
 deriva por debajo de la página de guarda sin tocarla (`sub rsp, N` es una operación de registro

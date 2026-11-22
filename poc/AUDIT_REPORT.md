@@ -40,6 +40,11 @@ acota la superficie a `if (param T)(result T)`, y `CodeUploadAccess = AllowEvery
   muere con `SIGSEGV`**. La ejecución ocurre en `FinalizeBlock`, que **ejecutan todos los
   nodos**, y la transacción maliciosa **pasa el `CheckTx`** sin llegar a ejecutar el contrato
   (§2.8.6): por tanto el alcance no es un nodo, sino un **halt de cadena** permissionless.
+- **Como muerte selectiva de nodos** (ver **§2.8.7**): la consulta gRPC `SmartContractState`
+  ejecuta el contrato en el nodo que la atiende, y su `recover()` solo captura *panics* de Go,
+  no señales. Un atacante puede instanciar el contrato y después bombardear las consultas
+  contra los nodos RPC publicos: cada nodo que responde, muere. El limite de gas de la query
+  (3 000 000) no protege, porque el crash cuesta 4 652.
 - **Como no determinismo de coma flotante** (ver **§2.9.2**): la rama falsa del `else` implícito
   **se salta la canonicalización de NaN**, de modo que un `f64` NaN conserva el *payload del
   hardware* (0xFFF8… en x86-64, 0x7FF8… en AArch64) en lugar del patrón canónico. Consecuencia
@@ -611,6 +616,51 @@ parar con limites de gas.
   entorno, §6): la conclusion se apoya en el codigo del SDK y de wasmd, y en el hecho medido
   de que el `SIGSEGV` mata el proceso que carga la libreria.
 
+#### 2.8.7 Segundo vector: las *smart queries* matan al nodo que las atiende
+
+El vector principal (§2.8.6) necesita que la transaccion llegue a un bloque. Hay un camino
+**mas direto y mas silencioso**: la consulta gRPC `SmartContractState` ejecuta el contrato en
+el nodo que la atiende.
+
+```go
+// wasmd/x/wasm/keeper/querier.go:192
+func (q GrpcQuerier) SmartContractState(c context.Context, req *types.QuerySmartContractStateRequest) (...) {
+        ...
+        bz, err := q.keeper.QuerySmart(ctx, contractAddr, req.QueryData)
+```
+
+```go
+// wasmd/x/wasm/keeper/keeper.go:884
+queryResult, gasUsed, qErr := k.wasmVM.Query(codeInfo.CodeHash, env, req, prefixStore, ...)
+```
+
+El `recover()` que envuelve la llamada solo captura **panics de Go**:
+
+```go
+// wasmd/x/wasm/keeper/querier.go:208
+defer func() {
+        if r := recover(); r != nil {
+                switch rType := r.(type) {
+                case storetypes.ErrorOutOfGas: ...
+                default: err = sdkerrors.ErrPanic
+                }
+        }
+}()
+```
+
+Un `SIGSEGV` no es un panic: no lo captura nadie. Y el limite de gas de la query
+(`defaultSmartQueryGasLimit = 3_000_000` gas del SDK) esta muy por encima de los 4 652 gas que
+necesita la forma fatal, asi que **tampoco protege**.
+
+Esto da un vector de **muerte selectiva de nodos**: basta con instanciar el contrato malicioso
+(una transaccion normal, que pasa el `CheckTx`) y despues lanzar consultas
+`SmartContractState` contra el. Cada nodo full-node o RPC que atienda la consulta ejecuta el
+contrato y **muere**. No hace falta que la transaccion maliciosa llegue a un bloque, ni que
+nadie la proponga: el atacante puede barrenar los endpoints publicos de la red.
+
+**Los dos vectores son complementarios:** el de la transaccion produce un halt de cadena; el de
+la query permite matar nodos concretos (incluidos los RPC) sin tocar el consensus.
+
 ### 2.9 Integridad: el alcance exacto de la afirmacion
 
 *(§2.6 demuestra, con oraculo diferencial, que los valores calculados por la forma cubierta son
@@ -919,9 +969,9 @@ registros **falla**, aunque su logica sea correcta. Es un fallo de disponibilida
 deterministico y reproducible. Con la forma de §2.8, ese mismo contrato ajeno puede **matar el
 proceso** —y, si su transaccion llega a un bloque, **matar a todos los nodos**.
 
-**Sobre el atacante:** obtiene una detencion de la cadena por 4 652 gas de SDK. **No** obtiene
-robo de fondos, **no** obtiene ejecucion de codigo y **no** obtiene corrupcion del estado de la
-cadena.
+**Sobre el atacante:** obtiene una detencion de la cadena por 4 652 gas de SDK, y ademas la
+muerte selectiva de nodos concretos via *smart queries* (§2.8.7). **No** obtiene robo de fondos,
+**no** obtiene ejecucion de codigo y **no** obtiene corrupcion del estado de la cadena.
 
 **Sobre la semantica (hallazgo 1c):** el atacante no controla el payload del NaN (lo produce el
 hardware), pero **si** controla que el contrato use la forma implicita, y por tanto que el
