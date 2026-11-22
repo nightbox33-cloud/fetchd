@@ -42,9 +42,11 @@ acota la superficie a `if (param T)(result T)`, y `CodeUploadAccess = AllowEvery
   (§2.8.6): por tanto el alcance no es un nodo, sino un **halt de cadena** permissionless.
 - **Como muerte selectiva de nodos** (ver **§2.8.7**): la consulta gRPC `SmartContractState`
   ejecuta el contrato en el nodo que la atiende, y su `recover()` solo captura *panics* de Go,
-  no señales. Un atacante puede instanciar el contrato y después bombardear las consultas
-  contra los nodos RPC publicos: cada nodo que responde, muere. El limite de gas de la query
-  (3 000 000) no protege, porque el crash cuesta 4 652.
+  no señales. **Medido:** el entry point `query` mata el proceso con `SIGSEGV` a partir de
+  **131 541 iteraciones**, mientras que el control con `else` explícito no muere. Un atacante
+  puede instanciar el contrato y después bombardear las consultas contra los nodos RPC
+  publicos: cada nodo que responde, muere. El limite de gas de la query (3 000 000) no protege,
+  porque el crash cuesta 4 652.
 - **Como no determinismo de coma flotante** (ver **§2.9.2**): la rama falsa del `else` implícito
   **se salta la canonicalización de NaN**, de modo que un `f64` NaN conserva el *payload del
   hardware* (0xFFF8… en x86-64, 0x7FF8… en AArch64) en lugar del patrón canónico. Consecuencia
@@ -661,6 +663,33 @@ nadie la proponga: el atacante puede barrenar los endpoints publicos de la red.
 **Los dos vectores son complementarios:** el de la transaccion produce un halt de cadena; el de
 la query permite matar nodos concretos (incluidos los RPC) sin tocar el consensus.
 
+**Medido sobre el `.so` de produccion** (`query_vector.py`, que anade el soporte de la ABI
+`query` al harness: `libwasmvm_query(cache, checksum, env, msg, db, api, querier, gas_limit,
+print_debug, gas_report, error_msg)`):
+
+| caso | resultado |
+|---|---|
+| `query-implicit` — el bucle en el entry point `query` | **SIGSEGV — el proceso muere** |
+| `query-explicit` — el control, el mismo modulo con `else` explicito | `ok`, sin crash |
+| `execute-implicit` — el bucle en `execute` (vector de §2.8) | **SIGSEGV — el proceso muere** |
+
+Frontera exacta del vector `query` (mismo `.so`, pila Wasm de 1 MiB):
+
+| iteraciones | resultado |
+|---|---|
+| 131 538, 131 539, 131 540 | `call stack exhausted` — trampa **recuperable** |
+| **131 541** y siguientes | **SIGSEGV — muerte del proceso** |
+
+El umbral es 2 iteraciones mas alto que el del vector `execute` (131 539): la diferencia es el
+*layout* del modulo (una funcion `query` adicional y, por tanto, un marco de pila inicial
+distinto), no un cambio en el mecanismo. El coste por iteracion es el mismo, asi que el precio
+sigue siendo ~4 652 gas de SDK.
+
+Detalle de implementacion que condiciona el PoC: el export `query` tiene la firma
+`(env_ptr, msg_ptr) -> result_ptr` —**dos** punteros, no tres como `execute`— porque
+`call_raw` concatena `env` y `msg` en una sola region antes de invocar el contrato
+(`cosmwasm-vm/packages/vm/src/calls.rs:863`).
+
 ### 2.9 Integridad: el alcance exacto de la afirmacion
 
 *(§2.6 demuestra, con oraculo diferencial, que los valores calculados por la forma cubierta son
@@ -1108,6 +1137,9 @@ python3 shape_matrix.py
 
 # --- ¿hay escapatoria del limite max_function_results? (§2.9.4) ---
 python3 blocktype_probe.py
+
+# --- segundo vector: el entry point `query` tambien mata el proceso (§2.8.7) ---
+python3 query_vector.py            # y con --iters N para la frontera
 ```
 
 Artefactos clones en `.audit/` (excluido de Git por `.git/info/exclude`):

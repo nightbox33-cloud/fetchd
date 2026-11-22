@@ -297,6 +297,16 @@ class VM:
             Db, GoApi, GoQuerier, ctypes.c_uint64, ctypes.c_bool,
             ctypes.POINTER(GasReport), ctypes.POINTER(UnmanagedVector),
         ]
+        # `query` has the same shape as `execute` minus the `info` argument:
+        #   struct UnmanagedVector query(cache, checksum, env, msg, db, api,
+        #                                 querier, gas_limit, print_debug,
+        #                                 gas_report, error_msg)
+        L.query.restype = UnmanagedVector
+        L.query.argtypes = [
+            ctypes.c_void_p, ByteSliceView, ByteSliceView, ByteSliceView,
+            Db, GoApi, GoQuerier, ctypes.c_uint64, ctypes.c_bool,
+            ctypes.POINTER(GasReport), ctypes.POINTER(UnmanagedVector),
+        ]
         L.new_unmanaged_vector.restype = UnmanagedVector
         L.new_unmanaged_vector.argtypes = [ctypes.c_bool, ctypes.c_void_p, ctypes.c_size_t]
         L.destroy_unmanaged_vector.restype = None
@@ -426,6 +436,18 @@ class VM:
         rep = GasReport()
         out = self.lib.execute(
             cache, view(checksum), view(b"{}"), view(b"{}"), view(b"{}"),
+            self._db, self._api, self._querier, gas_limit, False,
+            ctypes.byref(rep), ctypes.byref(err),
+        )
+        return out, rep, err
+
+    def query(self, cache, checksum, gas_limit):
+        """Runs the contract's `query` entry point (the one behind the gRPC
+        `SmartContractState` query).  Same shape as `execute` minus `info`."""
+        err = UnmanagedVector()
+        rep = GasReport()
+        out = self.lib.query(
+            cache, view(checksum), view(b"{}"), view(b"{}"),
             self._db, self._api, self._querier, gas_limit, False,
             ctypes.byref(rep), ctypes.byref(err),
         )
