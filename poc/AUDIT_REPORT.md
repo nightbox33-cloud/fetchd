@@ -13,6 +13,7 @@
 | 1a | Miscompilación de Singlepass (`if` con parámetro de bloque y `else` implícito) presente en producción | **Confirmado, sin parchear** | **Media** — disparador permissionless y barato (**7 754 gas de SDK**); rompe contratos legítimos |
 | 1b | **Escalada de la misma fuga a muerte del proceso** (`SIGSEGV` irrecuperable), que ocurre en `FinalizeBlock` | **Confirmado, sin parchear** | **Crítica** — disparador permissionless de **4 652 gas de SDK** (430× de holgura) que **detiene la cadena completa**: todos los nodos ejecutan el bloque y mueren (§2.8.6) |
 | 1c | **La rama falsa del `else` implícito se salta la canonicalización de NaN** → resultado flotante dependiente de la CPU, **ramificación divergente**, **precio cobrado ≠ precio cotizado** (§2.9.6), **split de consensus** (§2.9.7), **6 canales de escape medidos** (§2.9.8) y **divergencia de precio entre arquitecturas** (§2.9.9) | **Confirmado, sin parchear** | **Media/Alta** — divergencia de app hash entre arquitecturas, **generador permissionless de splits/halt**, **manipulación de oráculo cross-arch** (hasta 100 % de divergencia de precio) y riesgo al aplicar el parche |
+| 1d | **La fuga de pila es una primitiva de escritura arbitraria de 8 bytes**: el límite de gas fija la **dirección** (8 bytes de granularidad) y el residuo del gas fija el **camino de trap** cuyo `push` escribe el **valor i64 del atacante** (§2.9.10) | **Confirmado, sin parchear** | **Media/Alta** — corrupción de memoria del host con valor elegido por el atacante y dirección elegida a ciegas; **escape y robo NO demostrados** (el heap del proceso queda fuera del alcance del gas y no hay fuga de direcciones) |
 | 2 | Respuesta vacía del VM (`res.Ok == nil`) en wasmd | **Resuelto** — ya está en upstream v0.61.15 | Ninguna (guardas presentes) |
 | 3 | Clasificación errónea de fallos por el harness C ABI | **Corregido** en el PoC | Afectaba a reproducciones previas |
 | 4 | Confusión de unidades de gas (puntos de CosmWasm ≠ gas del SDK) en un análisis previo | **Corregido** — ver §2.5 | Invertía la conclusión de alcance |
@@ -548,6 +549,15 @@ justa: es lo que hace que el `if` reserve un *slot* de pila que la ruta falsa no
 > proceso** —y, por donde se ejecuta (§2.8.6), una **detencion de la cadena completa**. La
 > investigacion de una via de exfiltracion o de manipulacion del flujo de control
 > sigue **abierta** y se documenta por separado en §2.9 y §5.
+>
+> **Matiz posterior (§2.9.10).** Esta subseccion describe el efecto *observable* del disparador:
+> la muerte del proceso. Al investigar si la fuga de pila permite algo mas, se ha medido que
+> **si**: el limite de gas fija la **direccion** de una escritura de 8 bytes y el residuo del
+> gas fija el **camino de trap**, de modo que el atacante escribe **su propio i64** en una
+> direccion de su eleccion. Es una **primitiva de corrupcion de memoria del host**, no solo una
+> denegacion de servicio — pero **no** llega a ser un escape (ni ejecucion de codigo, ni robo):
+> el heap del proceso queda fuera del alcance del gas y no hay fuga de direcciones. Vease
+> §2.9.10.
 
 #### 2.8.6 El alcance real no es un nodo: es un **halt de cadena**
 
@@ -915,7 +925,7 @@ La regla (formulacion de esta version, **superada en detalle por §2.9.8**):
 > * `f64.copysign` **no** canonicaliza nunca: es una operacion de bits. El patron resultante
 >   coincide con el canonico solo por casualidad (borra el bit de signo).
 >
-> La matriz de 30 constructos de §2.9.8 es la referencia.
+> La matriz de 28 constructos de §2.9.8 es la referencia.
 
 Consecuencia: el defecto **no** se limita al valor de retorno de la funcion. Basta con que el
 contrato haga una **decision sobre los bits del NaN mediante `select`**, y la decision sale
@@ -1150,7 +1160,7 @@ arquitectura del set de validadores**.
 
 §2.9.5 caracteriza la regla con dos ejemplos (`if` con `else` implicito y `select`) y
 deja abierta en §6 la lista de operadores no cubiertos. **Esa lista ya no esta abierta:**
-`nan_operator_matrix.py` mide, sobre el `.so` de produccion, **30 constructos** de Wasm
+`nan_operator_matrix.py` mide, sobre el `.so` de produccion, **28 constructos** de Wasm
 que pueden transportar un `f64` a traves del codigo.
 
 **El mecanismo, con nombre y sitio.** En el backend Singlepass cada valor `f64` de la pila
@@ -1327,6 +1337,163 @@ distinta arquitectura.
 3. **Filtrar los contratos nuevos por gobernanza** (`CodeUploadAccess`): corta el vector en su
    primer eslabon, aunque exige que el contrato problemático no sea anterior a la medida.
 
+#### 2.9.10 El intento de escape: una escritura de 8 bytes con dirección y valor elegidos por el atacante
+
+Esta sección es el resultado del intento de convertir el defecto de §2.8 en un **escape del
+sandbox Wasm** y de buscar una **vía de robo** asociada. La pregunta que se responde es
+concreta: *¿la fuga de pila permite escribir donde quiere el atacante, con el valor que
+quiera?* La respuesta es **parcialmente sí, y con un límite estructural importante**. Se
+documenta lo medido, lo que no se ha demostrado y por qué.
+
+**Punto de partida: qué escribe el JIT, y hacia dónde.** El análisis estático del código JIT
+de producción (`primitive_probe.py`, sobre el `.module` compilado por el binario que fetchd
+carga) inventaría **todas** las escrituras de memoria del módulo y las clasifica por su modo de
+direccionamiento. El inventario completo (módulo con fuga + llamada final):
+
+| clase | número | qué es |
+|---|---|---|
+| escritura RBP-relativa, desplazamiento constante de compilación | 28 | los slots del stack de valores (`-0x8 … -0x74`) |
+| escritura RSP-relativa, con desplazamiento | **0** | — |
+| `push` (reservas y direcciones de retorno) | 41 | |
+| escritura con base de registro + offset fijo (`%r15`, `%r14`, `%rax`…) | 48 | el contexto del VM y la memoria guest |
+| **escritura con índice de registro (dirección del atacante)** | **0** | — |
+| `call` | 24 | |
+
+El punto decisivo es el **cero** de la cuarta fila: **ninguna escritura del JIT tiene una
+dirección que dependa de un registro que el atacante controle**. Y el **cero** de la segunda
+fila: ninguna escritura sigue al RSP derivado. Esto es consecuencia directa del código fuente
+de Wasmer 7.4.2 (`.audit/wasmer`): `acquire_location_on_stack()`/`release_stack_locations()`
+en `lib/compiler-singlepass/src/codegen.rs` emparejan el contador de compilación `stack_offset`
+con un `sub rsp, 8`/`add rsp, 8` real, mientras que `local_on_stack()`
+(`lib/compiler-singlepass/src/machine_x64.rs`) direcciona el slot como
+`Location::Memory(RBP, -stack_offset)` — **RBP, no RSP**. El `sub rsp, 8` de la fuga es, por
+tanto, una operación de **registro puro**: no escribe memoria.
+
+**Lo único que sí sigue al RSP** son los `push` que emite el JIT: la dirección de retorno que
+empuja un `call` y, en los caminos de trap, los registros preservados (`push %r8 … push %r11`).
+El runtime lo confirma: en el fallo mortal, `si_addr == RSP - 8` exactamente y el RIP está en el
+`call` (`0x54d` dentro del módulo JIT), es decir **la escritura fatal es el `push` de la
+dirección de retorno del propio JIT** —no un dato del atacante—, en una dirección que cae por
+debajo de la página de guarda del stack de Wasm.
+
+**El gas es el mando de la dirección.** La fuga baja el RSP **8 bytes por iteración**, y el
+número de iteraciones lo fija el **límite de gas** de la llamada (`execute`/`query`), que en la
+cadena lo elige el atacante (es el gas de su transacción). La relación es **afín y medida**
+(`escape_probe.py`):
+
+```
+deriva (bytes) = 8 · iteraciones ,   iteraciones = (gas − c₀) / 5 060
+dirección_de_escritura(G) = A(G_ancla) − 8·(G − G_ancla)/5 060
+```
+
+Medido: con 1 000 000 000 de puntos de gas la escritura cae en `0x…447c2e8` y con
+10 000 000 000 en `0x…b3f633e8`; la pendiente es **1,581028·10⁻³ bytes por punto de gas**
+(8 bytes por iteración, 5 060 puntos de gas por iteración) y el `RBP` es idéntico en todas las
+ejecuciones. **El atacante elige la dirección con granularidad de 8 bytes**, en un rango que
+crece con el gas.
+
+**La primitiva: dirección y valor del atacante.** Aquí está el resultado central. El JIT tiene
+varios caminos de trap: unos empujan los registros antes de llamar al manejador de trampas
+—escribiendo por tanto **valores i64 del atacante**— y otros no (escriben la dirección de
+retorno del JIT). El camino que se dispara depende del **residuo del gas módulo 5 060**, así que
+el atacante puede **elegirlo**. Con el camino que empuja los registros, la lectura de la memoria
+del proceso objetivo muestra, en la dirección apuntada:
+
+```
+0x7f5ad0000fe8  0xa1a1a1a1a1a1a1a1   <== valor del atacante
+0x7f5ad0000ff0  0xa1a1a1a1a1a1a1a1   <== valor del atacante
+0x7f5ad0000ff8  0xa1a1a1a1a1a1a1a1   <== valor del atacante
+0x7f5ad0001000  0xa1a1a1a1a1a1a1a1   <== valor del atacante  (dirección apuntada)
+0x7f5ad0000fe0  0x7f5ad44713274      <== dirección de retorno del JIT (5.ª escritura)
+```
+
+Es decir: **una escritura de 8 bytes, con la dirección elegida por el atacante (exacta, no
+aproximada) y con el valor elegido por el atacante**, dentro de una región `rw-p` real del
+proceso. Y el resultado **depende del camino de trap**: con algunos el proceso **sobrevive**
+—corrupción silenciosa, el `execute` devuelve `Ran out of gas` con normalidad— y con otros
+murre al usar el estado ya corrupto. En una de las ejecuciones, **glibc detecta la corrupción
+en su propio heap** (`free(): invalid next size (normal)`).
+
+Esto **supera** lo que §2.8 afirmaba: no es solo "una fuga de stack". Es una primitiva de
+escritura arbitraria de 8 bytes con valor elegido por el atacante.
+
+**Qué se alcanza y qué no.** El alcance de la deriva lo fija el gas, y aquí los limites son
+duros:
+
+| vía | límite de gas | deriva máxima alcanzable |
+|---|---|---|
+| transacción (`execute`) | `max_gas` de bloque = **2 000 000** gas de SDK (fetchhub-3/4) | ≈ **442 GB** por debajo del stack de Wasm |
+| *smart query* (`query`) | `SmartQueryGasLimit` = **3 000 000** gas de SDK (`priv_wasmd_sec/x/wasm/types/types.go:21`) | ≈ **663 GB** por debajo del stack de Wasm |
+| heap del proceso (`brk`, donde vive el contexto del VM) | ~6,3·10¹¹ gas de SDK | **fuera de alcance** |
+
+El stack de Wasm está en la parte **alta** del espacio de `mmap` y la deriva solo baja, de modo
+que el alcance es **todo el espacio de `mmap`**: la memoria guest del contrato, los módulos JIT
+compilados y las bibliotecas compartidas. **No** alcanza el heap del proceso, que es donde
+Singlepass guarda el contexto del VM (`vmctx`), el puntero del manejador de trampas
+(`vmctx + 0x90`) y el resto de estructuras de Wasmer. Con una stolen referencia a esos
+punteros, el vector dejaría de ser ciego; sin ella, el punto de entrada —el `call *%rax` que
+invoca al manejador de trampas— **no es alcanzable**.
+
+**La vía de robo: qué se ha demostrado y qué no.** La vía de robo exigida por el encargo es una
+ruta **comprobable** (primitiva, alcance y efecto). Con lo medido:
+
+* **Primitiva:** existe y está medida — escritura de 8 bytes, dirección exacta elegida por el
+  gas, valor i64 elegido por el atacante (`escape_probe.py`).
+* **Alcance:** la región `mmap` bajo el stack de Wasm, hasta 442–663 GB de deriva; el heap del
+  proceso queda fuera.
+* **Efecto:** corrupción de memoria del host **medida** (y detectada por el propio allocator).
+  **No** hay ejecución de código, **no** hay lectura de memoria arbitraria, **no** hay
+  exfiltración de secretos y **no** hay robo on-chain.
+
+Lo que falta para convertir esto en un escape o en una vía de robo es concreto y enunciable:
+
+1. **Un objetivo que valga.** Los punteros interesting (`vmctx`, manejador de trampas, GOT de
+   `libwasmvm.so`) están en el heap, fuera del alcance del gas. El `GOT` de la biblioteca sí
+   está en el `mmap`… pero corrupto **a ciegas**: el atacante no conoce su dirección.
+2. **Una fuga de direcciones.** No se ha encontrado ninguna en este defecto: el único oráculo
+   disponible es el propio fallo (1 bit: "¿cayó en una región mapeada?"), y acertar requiere
+   información que el atacante no tiene. La divergencia de NaN de §2.9.6–§2.9.9 es un oráculo
+   de **precio y rama**, no de direcciones.
+3. **Un valor útil.** El valor controlado es un entero de 64 bits del atacante; sin conocer la
+   dirección de un puntero, no se puede construir ni una cadena de retorno ni una
+   redirección de flujo.
+
+Por tanto, la **conclusión honesta** es: **la primitiva de corrupción arbitraria existe y está
+medida, pero no se ha construido un escape ni una vía de robo a partir de ella**, y la
+razón es estructural (el heap queda fuera de alcance y no hay fuga de direcciones), no una
+falta de esfuerzo del análisis. Lo que sí cambia respecto a la formulación anterior de §2.8 es
+que la consecuencia de un exploit **no** sería un simple `SIGSEGV`: sería una corrupción de
+memoria del host con valor elegido por el atacante.
+
+**Límites honestos de esta medición.**
+
+* El análisis estático y en runtime se ha hecho sobre el **x86-64** del `.so` de producción; el
+  backend AArch64 de Singlepass (`machine_arm64.rs`) **no** se ha desensamblado. La estructura
+  del defecto (contador de compilación vs. `sub/add` de pila) es la misma, pero la granularidad
+  y el camino de trap concretos en ARM no están medidos.
+* La calibración gas → dirección depende del **coste de gas por iteración**, que se ha medido
+  para este módulo concreto (5 060 puntos). Un módulo con otro cuerpo puede tener otro coste;
+  el atacante lo calibra con el mismo oráculo (el fallo), y por tanto el método es general, pero
+  la cifra no lo es.
+* La «supervivencia» del proceso depende de **qué** haya en la dirección apuntada: algunos
+  caminos de trap corrompen estructuras vivas y el proceso muere al usarlas. Es decir, la
+  corrupción silenciosa es posible pero **no garantizada** para un objetivo arbitrario.
+* No se ha construido un módulo que apunte a la **memoria guest** del propio contrato ni se ha
+  medido la estabilidad del desplazamiento relativo entre el stack de Wasm y las demás regiones
+  de `mmap` entre ejecuciones y entre nodos. Es el experimento que faltaría para saber si el
+  atacante puede apuntar *de forma determinista* a algo del host, y no se ha hecho.
+* El mecanismo de **elección del camino de trap** por el residuo del gas se ha medido en este
+  módulo; no se ha auditado si el mismo residuo tiene el mismo efecto en el binario de AArch64.
+
+**Conclusión de la sección.** El intento de escape **no** produce un escape demostrado, y **no**
+produce una vía de robo. Pero sí produce un resultado que **cambia la clasificación del
+defecto**: la fuga de pila de §2.8 es, en realidad, una **primitiva de escritura arbitraria de
+8 bytes con valor elegido por el atacante**, cuyo alcance esta acotado por el gas y excluye el
+heap del proceso. El impacto *demostrado* y *reproducible* sigue siendo el **halt de cadena**
+de §2.8 (4 652 gas de SDK, permissionless); esta sección añade el **potencial** de corrupción
+de memoria del host, con sus precondiciones y sus límites, sin convertirse en un hallazgo de
+RCE.
+
 ### 2.10 La configuracion efectiva en fetchd, verificada extremo a extremo
 
 Todo lo anterior se ha medido sobre el binario que fetchd carga de verdad. Esta seccion
@@ -1460,13 +1627,26 @@ proceso** —y, si su transaccion llega a un bloque, **matar a todos los nodos**
 
 **Sobre el atacante:** obtiene una detencion de la cadena por 4 652 gas de SDK, y ademas la
 muerte selectiva de nodos concretos via *smart queries* (§2.8.7). **No** obtiene robo de fondos,
-**no** obtiene ejecucion de codigo y **no** obtiene corrupcion del estado de la cadena.
+**no** obtiene ejecucion de codigo y **no** obtiene corrupcion del estado de la cadena. Lo que
+**si** obtiene, y no se habia medido antes, es una **escritura de 8 bytes con valor elegido por
+el** en una region `mmap` del host, a ciegas en cuanto a la direccion (§2.9.10): corrupcion de
+memoria del host, no del estado de la cadena.
 
 **Sobre la semantica (hallazgo 1c):** el atacante no controla el payload del NaN (lo produce el
 hardware), pero **si** controla que el contrato use la forma implicita, y por tanto que el
 resultado flotante dependa de la CPU. El efecto medido es una **ramificacion divergente** con
 estado distinto del contrato (§2.9.2): es un vector de **divergencia de app hash**, no de robo.
 La hipotesis de *exfiltracion* de datos mediante esta via sigue sin demostrarse.
+
+**Sobre la primitiva de escritura (hallazgo 1d, §2.9.10).** La consecuencia de un exploit **ya no
+es solo un `SIGSEGV`**: el limite de gas fija la direccion de una escritura de 8 bytes y el residuo
+del gas fija el camino de trap, de modo que el atacante escribe **su propio i64** en una direccion
+**de su eleccion** dentro del `mmap` del host. Es una **corrupcion de memoria del host con valor
+elegido por el atacante**, medida y reproducible. Lo que **no** esta demostrado es el escape: el
+heap del proceso —donde vive el contexto del VM y el puntero del manejador de trampas— queda
+**fuera del alcance del gas**, y no hay **ninguna fuga de direcciones** que convierta la
+escritura a ciegas en un objetivo conocido. El impacto demostrado sigue siendo el **halt de
+cadena** de §2.8; este hallazgo anade el **potencial** de corrupcion de memoria del host.
 
 ### 2.12 Recomendacion
 
@@ -1501,6 +1681,14 @@ La hipotesis de *exfiltracion* de datos mediante esta via sigue sin demostrarse.
    `WasmLimits` **no** son una via de mitigacion: estan en la configuracion del nodo, no on-chain,
    y ademas no acotan este defecto (la forma alcanzable `if (param T)(result T)` ya esta
    dentro de los limites por defecto).
+
+6. **Restringir el alcance de la primitiva de escritura (§2.9.10).** El gas es el mando de la
+   direccion, asi que **acotar el gas por contrato** acota el alcance de la escritura: con el
+   `max_gas` de bloque actual (2 000 000) el alcance es de ~442 GB de deriva —todo el `mmap` bajo
+   el stack de Wasm—. Un limite por contrato **muy inferior** al limite de bloque reduce el
+   alcance drasticamente. No es una mitigacion del DoS de §2.8 (que cuesta 4 652 gas de SDK), pero
+   si lo es de la primitiva de escritura. En el mismo sentido, **acotar el tamano del stack de
+   Wasm** reduce la distancia hasta la primera region `mmap` alcanzable.
 
 ## 3. Hallazgo 2 — `res.Ok == nil` en wasmd: ya resuelto
 
@@ -1606,6 +1794,16 @@ python3 blocktype_probe.py
 
 # --- segundo vector: el entry point `query` tambien mata el proceso (§2.8.7) ---
 python3 query_vector.py            # y con --iters N para la frontera
+
+# --- intento de escape: escritura arbitraria (§2.9.10) ---
+# gas -> direccion de la escritura, eleccion del camino de trap por el residuo
+# del gas, y verificacion del valor i64 escrito en la direccion apuntada
+python3 escape_probe.py
+
+# inventario estatico de las escrituras del JIT: modo de direccionamiento
+# (28 RBP-relativas, 0 RSP-relativas, 0 con indice de registro) y clasificacion
+# de los caminos de trap (con y sin `push` de registros)
+python3 primitive_probe.py
 ```
 
 Artefactos clones en `.audit/` (excluido de Git por `.git/info/exclude`):
@@ -1669,6 +1867,16 @@ Fuentes de referencia obtenidas para esta auditoría:
   de `priv_wasmvm_sec` configurase `VMConfig::wasm_stack_size`, el umbral cambiaría
   proporcionalmente; el `.so` de producción **no exporta** ningun setter de ese tamaño, asi que
   se usa el valor por defecto.
+* **La primitiva de escritura de §2.9.10 esta medida, pero el escape no.** La corrupcion de
+  memoria del host (direccion elegida por el gas, valor i64 elegido por el atacante) es un
+  hecho medido; la construccion de un **escape, una cadena de retorno o una lectura
+  arbitraria** sobre ella **no se ha hecho** y no se afirma. El limite es estructural: el
+  **heap del proceso queda fuera del alcance del gas** (hacia donde solo se puede *bajar*, el
+  heap esta en una region `brk` por debajo del `mmap` del stack de Wasm) y **no hay ninguna
+  fuga de direcciones** que convierta la escritura a ciegas en un objetivo conocido. El analisis
+  estatico y en runtime de la primitiva se ha hecho sobre el **x86-64**; el backend AArch64 de
+  Singlepass **no** se ha desensamblado, y el **coste de gas por iteracion** (5 060) es el de este
+  modulo concreto (el metodo de calibracion es general, la cifra no).
 * La busqueda de una via de *exfiltracion* de datos (distinta de la escalada a muerte de proceso
   y del vector financiero de §2.9.6) **sigue abierta**: §2.9.2 demuestra una **ramificacion
   divergente** por la perdida de la canonicalizacion de NaN y §2.9.6 un **precio cobrado
@@ -1682,7 +1890,7 @@ Fuentes de referencia obtenidas para esta auditoría:
   `branch` (con un valor **distinto**, el caso que el test upstream no puede distinguir),
   `unreachable`, `nested` y `f32`, con **0 desviaciones**; y `blocktype_probe.py` (§2.9.4)
   demuestra que la superficie alcanzable no se puede ampliar por la via del *block type*.
-  **Cerrado para los operadores de control y de datos:** §2.9.8 mide **30 constructos**
+  **Cerrado para los operadores de control y de datos:** §2.9.8 mide **28 constructos**
   (`if` implicito/explicito, `select`, `br_if`, `br`, `br_table`, `return`, `block`, `loop`,
   `call`, `call_indirect`, `local.get/set/tee`, `global.get/set`, `f64.load/store`,
   `f64.copysign`, `f64.max`, `f64.min`, `f64.reinterpret_i64`) sobre el `.so` de produccion:

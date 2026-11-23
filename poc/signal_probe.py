@@ -72,6 +72,7 @@ def _handler(sig, info, ctx):
     addr = 0
     rsp = 0
     rip = 0
+    rbp = 0
     try:
         if info:
             addr = info.contents.si_addr or 0
@@ -82,11 +83,12 @@ def _handler(sig, info, ctx):
             u = ctypes.cast(ctx, ctypes.POINTER(R.UContext)).contents
             rsp = u.uc_mcontext[R.REG_RSP]
             rip = u.uc_mcontext[R.REG_RIP]
+            rbp = u.uc_mcontext[R.REG_RBP]
     except Exception:
         pass
     try:
-        os.write(_FD["w"], b"SIGSEGV addr=0x%x rsp=0x%x rip=0x%x\n"
-                 % (addr, rsp, rip))
+        os.write(_FD["w"], b"SIGSEGV addr=0x%x rsp=0x%x rbp=0x%x rip=0x%x\n"
+                 % (addr, rsp, rbp, rip))
     except Exception:
         pass
     try:

@@ -51,12 +51,13 @@ misma sonda.
 | **`query_vector.py`** | **Segundo vector (§2.8.7)**: el entry point `query` (el de la consulta gRPC `SmartContractState`) tambien mata el proceso — `query-implicit` → **SIGSEGV**, `query-explicit` → ok, `execute-implicit` → SIGSEGV. Umbral: ≤131 540 → trampa, **≥131 541 → SIGSEGV** |
 | **`nan_rule_probe.py`** | **La regla exacta de la pérdida de canonicalización** (§2.9.5): 4 formas de cruzar el NaN por el `if`. Clave: **`select` (0x1B) no abre frame y no canonicaliza**, así que la divergencia es observable *dentro* del contrato |
 | **`nan_money_probe.py`** | **¿Es posible el robo? (§2.9.6)**: el par cotización (`query`) / cobro (`execute`) de un AMM. Con `if` implícito en uno y explícito en el otro, el usuario **ve 900 y paga 1000** — 4/4 casos medidos y estables |
-| **`nan_operator_matrix.py`** | **Matriz de 30 constructos (§2.9.8)**: qué operadores dejan escapar el NaN crudo. Dos sondas: **A** (los 64 bits que ve un atacante tras `i64.reinterpret_f64`) y **B** (los 64 bits que quedan en el estado tras `f64.store`). Resultado: **`br_if`, `br_table`, `return`, `call` y `call_indirect` canonicalizan** y **no** añaden canales; escapan el `else` implícito, `f64.load`, `f64.load`+`f64.store` (persiste en el estado), `f64.load`+`f64.copysign(-1.0)`, `f64.load`+`select` y `f64.reinterpret_i64` |
+| **`nan_operator_matrix.py`** | **Matriz de 28 constructos (§2.9.8)**: qué operadores dejan escapar el NaN crudo. Dos sondas: **A** (los 64 bits que ve un atacante tras `i64.reinterpret_f64`) y **B** (los 64 bits que quedan en el estado tras `f64.store`). Resultado: **`br_if`, `br_table`, `return`, `call` y `call_indirect` canonicalizan** y **no** añaden canales; escapan el `else` implícito, `f64.load`, `f64.load`+`f64.store` (persiste en el estado), `f64.load`+`f64.copysign(-1.0)`, `f64.load`+`select` y `f64.reinterpret_i64` |
 | **`nan_isa_probe.py`** | **¿Cada ISA produce los mismos bits? (§2.9.9)**: mide `SQRTSD(-1.0)` en x86-64 nativo (→ `0xfff8000000000000`) y `FSQRT(-1.0)` en emulación ARM64 real (→ `0x7ff8000000000000`). **La misma operación inválida produce bits distintos en cada ISA** — el origen medido de la divergencia cross-arquitectura. Necesita `pip install unicorn` |
 | **`nan_oracle_probe.py`** | **Manipulación de oráculo cross-arquitectura (§2.9.9)**: el mismo contrato de terceros devuelve un precio distinto en un nodo x86-64 y en uno AArch64. Magnitudes medidas: 900/1000 → 10 %, 1/2 → 50 %, **0/1 000 000 → 100 %**. Sin halt, sin fork, sin stake: es divergencia *off-chain* entre dos nodos honestos |
 | **`blocktype_probe.py`** | **¿Hay escapatoria del límite `max_function_results`?** Un `if` multi-resultado por type index → `REJECTED`; por tipo func *inline* → `REJECTED` (el parser no lo admite); control `(param i32)(result i32)` → `OK`. La superficie alcanzable es exactamente `if (param T)(result T)` |
 | **`shape_matrix.py`** | Matriz de **formas** de bloque (`passthrough`, `replace`, `branch` con valor distinto, `unreachable`, `nested`, `f32`): el `else` implícito coincide con el explícito y con la spec en **0 desviaciones** |
-| `drift_fault.py` | Diagnóstico del aterrizaje del SP desviado y mapa de memoria completo |
+| **`escape_probe.py`** | **El intento de escape (§2.9.10)**: ¿la fuga de pila permite escribir donde y con qué quiere el atacante? **Sí, parcialmente**: el límite de gas fija la **dirección** de la escritura (granularidad de 8 bytes, pendiente medida de 1,581028·10⁻³ bytes por punto de gas) y el **residuo del gas módulo 5 060** fija el camino de trap, cuyo `push` de registros escribe un **i64 del atacante**. Medición: 4 qwords `0xa1a1…` en la dirección apuntada, dentro de una región `rw-p` real; con algunos caminos el proceso **sobrevive** (corrupción silenciosa) y con otros glibc detecta el heap corrupto (`free(): invalid next size`). **No** se ha construido escape, ROP, lectura arbitraria ni robo: el heap del proceso queda fuera del alcance del gas y no hay fuga de direcciones |
+| `drift_fault.py` | Diagnóstico del aterrizaje del SP deviado y mapa de memoria completo |
 | `jit_analyze.py` | Extrae el código JIT del caché y calcula el balance de RSP de los bucles |
 | `crash_test.py` | Matriz producción-like de muerte de proceso (600–4096 `if`/iteración) |
 | `kill_sweep.py` | Barrido de muerte de proceso en subprocesos (72 variantes) |
@@ -126,6 +127,20 @@ los límites de validación quedan en sus defaults —en particular `max_functio
 es lo que acota la superficie a `if (param T)(result T)`—. Y `CodeUploadAccess = AllowEverybody`
 (wasmd `DefaultParams`) significa que **cualquier cuenta** puede subir el contrato y llegar al
 disparador.
+
+**La fuga de pila es también una primitiva de escritura arbitraria (§2.9.10).** El `RSP` baja
+8 bytes por iteración de la fuga y el número de iteraciones lo fija el **límite de gas**, que
+el atacante elige: la dirección de la escritura es, por tanto, **elegida por el atacante** (con
+granularidad de 8 bytes). El JIT tiene caminos de trap que empujan los registros del atacante
+—escribiendo un i64 chosen por él— y el **residuo del gas módulo 5 060** (5 060 puntos de gas
+por iteración) selecciona el camino. `escape_probe.py` lo mide: la escritura cae **exactamente**
+en la dirección apuntada, con el valor `0xa1a1a1a1a1a1a1a1`, y el proceso **sobrevive** en
+algunos caminos de trap (corrupción silenciosa) o muere por estado corrupto en otros. Los
+**límites son duros**: el alcance son los 442–663 GB de deriva que permite el `max_gas` (todo el
+`mmap` bajo el stack de Wasm), pero el **heap del proceso queda fuera** —y ahí viven el contexto
+del VM y el puntero del manejador de trampas—, y no hay **ninguna fuga de direcciones** que
+convierta la corruption de «a ciegas» en un objetivo conocido. Por eso la conclusión es
+«primitiva medida, escape **no** demostrado».
 
 **El split de consenso (§2.9.7).** La heterogeneidad de arquitectura es real: el fork privado
 distribuye `libwasmvm.aarch64.so` y el `Makefile` de fetchd v0.15.1 verifica el SHA256 del
